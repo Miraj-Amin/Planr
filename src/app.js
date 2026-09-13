@@ -144,7 +144,7 @@ function renderApp() {
       people:       db.all('people'),
       deliverables: db.all('deliverables'),
       onSelect: projId => openProject(projId),
-      onCreate: () => newProjectForm(db, currentUserId, proj => {
+      onCreate: () => newProjectForm(db, supabase, currentUserId, proj => {
         // update overview cache immediately
         db._cache.projects = db._cache.projects || [];
         if (!db._cache.projects.find(p=>p.id===proj.id)) db._cache.projects.push(proj);
@@ -152,7 +152,7 @@ function renderApp() {
       }),
     });
     document.getElementById('mainBtn')?.addEventListener('click', () =>
-      newProjectForm(db, currentUserId, proj => openProject(proj.id)));
+      newProjectForm(db, supabase, currentUserId, proj => openProject(proj.id)));
     return;
   }
 

@@ -1,4 +1,6 @@
-// forms.js — all create/edit forms. Each opens a modal, saves to db, calls onDone.
+// forms.js — all create/edit forms.
+// newProjectForm uses direct awaited Supabase calls to guarantee
+// sequential insert order (project must exist before project_members).
 
 import { openModal } from './modal.js';
 
@@ -10,8 +12,8 @@ const EFFORT_OPTS = [
 ];
 
 // ── PROJECT ──────────────────────────────────────────────────────────────────
-// userId is the auth.uid() of the current user — needed to add them as owner
-export function newProjectForm(db, userId, onDone) {
+// supabase: the raw Supabase client (from db.js) — needed for sequential awaits
+export function newProjectForm(db, supabase, userId, onDone) {
   openModal({
     title: 'New project',
     fields: [
@@ -19,23 +21,37 @@ export function newProjectForm(db, userId, onDone) {
       { key:'client_org', label:'Client organisation', type:'text', placeholder:'e.g. Acme Corp' },
     ],
     submitLabel: 'Create project',
-    onSubmit: data => {
-      const proj = db.insert('projects', {
-        name: data.name, client_org: data.client_org || null, status: 'active',
-      });
-      // Add creator as owner — critical for RLS to allow reads after refresh
+    onSubmit: async data => {
+      // 1. Insert project — WAIT for Supabase to confirm it exists
+      const { data: proj, error: projErr } = await supabase
+        .from('projects')
+        .insert({ name: data.name, client_org: data.client_org || null, status: 'active' })
+        .select()
+        .single();
+
+      if (projErr) throw new Error(projErr.message);
+
+      // 2. Add to local cache immediately
+      (db._cache = db._cache || {});
+      (db._cache.projects = db._cache.projects || []).push(proj);
+
+      // 3. Only AFTER project confirmed on server, add user as owner
       if (userId) {
-        db.insert('project_members', {
-          project_id: proj.id, user_id: userId, role: 'owner',
-        });
+        const { error: pmErr } = await supabase
+          .from('project_members')
+          .insert({ project_id: proj.id, user_id: userId, role: 'owner' });
+        if (pmErr) console.warn('project_members insert failed:', pmErr.message);
       }
-      // Seed Sprint 1
-      db.insert('sprints', {
+
+      // 4. Seed Sprint 1 (fire-and-forget is fine here — no FK dependency)
+      const sprint = {
         project_id: proj.id, is_active: true,
         name: 'Sprint 1 · ' + new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short'}),
         start_date: new Date().toISOString().slice(0,10),
         end_date:   new Date(Date.now()+12096e5).toISOString().slice(0,10),
-      });
+      };
+      await supabase.from('sprints').insert(sprint);
+
       onDone(proj);
     },
   });
@@ -43,11 +59,11 @@ export function newProjectForm(db, userId, onDone) {
 
 // ── TASK ─────────────────────────────────────────────────────────────────────
 export function newTaskForm(db, projectId, opts={}, onDone) {
-  const people      = db.all('people');
-  const phases      = db.all('tasks').filter(t => t.project_id===projectId && t.type==='phase');
-  const deliverables= db.all('deliverables').filter(d => d.project_id===projectId);
-  const sprints     = db.all('sprints').filter(s => s.project_id===projectId);
-  const activeSprint= sprints.find(s=>s.is_active) || sprints[0];
+  const people       = db.all('people');
+  const phases       = db.all('tasks').filter(t => t.project_id===projectId && t.type==='phase');
+  const deliverables = db.all('deliverables').filter(d => d.project_id===projectId);
+  const sprints      = db.all('sprints').filter(s => s.project_id===projectId);
+  const activeSprint = sprints.find(s=>s.is_active) || sprints[0];
 
   openModal({
     title: opts.title || 'New task',
@@ -106,7 +122,7 @@ export function newPhaseForm(db, projectId, onDone) {
     submitLabel: 'Create phase',
     onSubmit: data => {
       const phase = db.insert('tasks', {
-        project_id:data.project_id||projectId, type:'phase', name:data.name,
+        project_id:projectId, type:'phase', name:data.name,
         start_date:data.start_date||null, end_date:data.end_date||null,
         status:'todo', progress:0, sort_order:Date.now(),
       });
@@ -115,7 +131,7 @@ export function newPhaseForm(db, projectId, onDone) {
   });
 }
 
-// ── DELIVERABLE ──────────────────────────────────────────────────────────────
+// ── DELIVERABLE ───────────────────────────────────────────────────────────────
 export function newDeliverableForm(db, projectId, onDone) {
   openModal({
     title: 'New deliverable',
@@ -143,7 +159,7 @@ export function newMeetingForm(db, projectId, onDone) {
     title: 'New meeting',
     wide: true,
     fields: [
-      { key:'title',        label:'Meeting title',   type:'text',   required:true, placeholder:'e.g. Francis Group — weekly delivery call' },
+      { key:'title',        label:'Meeting title',   type:'text',   required:true, placeholder:'e.g. Weekly delivery call' },
       { key:'date',         label:'Date',            type:'date',   required:true, value:new Date().toISOString().slice(0,10) },
       { key:'start_time',   label:'Start time',      type:'time',   value:'09:00' },
       { key:'duration_min', label:'Duration (mins)', type:'number', value:55, min:5, step:5 },
@@ -163,7 +179,7 @@ export function newMeetingForm(db, projectId, onDone) {
   });
 }
 
-// ── MEETING ITEM ─────────────────────────────────────────────────────────────
+// ── MEETING ITEM ──────────────────────────────────────────────────────────────
 export function newMeetingItemForm(db, projectId, meetingId, kind, onDone) {
   const people = db.all('people');
   const isFollowup = kind === 'followup';
@@ -176,8 +192,7 @@ export function newMeetingItemForm(db, projectId, meetingId, kind, onDone) {
         placeholder:isFollowup?'Who owns this?':'Optional owner',
         options:people.map(p=>({value:p.id,label:p.name+(p.is_client?' (client)':'')})) },
       ...(isFollowup
-        ? [{ key:'end_date', label:'Due date', type:'date', required:true,
-             hint:'For client-owned items this must be agreed in the meeting.' }]
+        ? [{ key:'end_date', label:'Due date', type:'date', required:true }]
         : [{ key:'end_date', label:'Target date', type:'date' }]),
       { key:'notes', label:'Notes', type:'textarea', placeholder:'Optional…' },
     ],
