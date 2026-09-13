@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planr</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css" rel="stylesheet">
+<link rel="stylesheet" href="./src/styles/base.css">
+<link rel="stylesheet" href="./src/styles/plan.css">
+</head>
+<body>
+<div class="app">
+  <div class="rail">
+    <div class="logo">P</div>
+    <div id="rnav" style="display:flex;flex-direction:column;gap:2px;align-items:center"></div>
+    <div style="flex:1"></div>
+    <div class="ri"><i class="ti ti-settings"></i></div>
+  </div>
+  <div class="main">
+    <div class="top">
+      <div class="crumb"><span class="dim">Projects</span><i class="ti ti-chevron-right"></i><select id="projSel"></select></div>
+      <button class="btn"><i class="ti ti-plus" style="font-size:11px"></i>New task</button>
+    </div>
+    <div class="tabs"><div id="tabset" style="display:flex"></div></div>
+    <div class="view" id="view"></div>
+    <div class="panel" id="panel"><div id="panelIn"></div></div>
+  </div>
+</div>
+<script type="module" src="./src/app.js"></script>
+</body>
+</html>
