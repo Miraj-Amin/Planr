@@ -12,7 +12,7 @@ export class LocalAdapter {
   get(t, id)    { return (this.db[t] || []).find(r => r.id === id) || null; }
   where(t, fn)  { return (this.db[t] || []).filter(fn); }
   insert(t, rec){ rec.id = rec.id || (t.slice(0,2)+'_'+Math.random().toString(36).slice(2,9));
-                  (this.db[t] = this.db[t] || []).push(rec); this._persist(); return rec; }
+                  (this.db[t]=this.db[t]||[]).push(rec); this._persist(); return rec; }
   update(t, id, patch){ const r=this.get(t,id); if(r){Object.assign(r,patch);this._persist();} return r; }
   remove(t, id) { this.db[t]=(this.db[t]||[]).filter(r=>r.id!==id); this._persist(); }
 }
@@ -20,6 +20,31 @@ export class LocalAdapter {
 export class SupabaseAdapter {
   constructor(client) { this.sb = client; this._cache = {}; }
 
+  // Lightweight load for the projects overview — fetches all projects + slim task list
+  async loadOverview() {
+    const [projects, tasks, people, deliverables] = await Promise.all([
+      this.sb.from('projects').select('*'),
+      this.sb.from('tasks').select('id,project_id,status,end_date,owner_id,type,flagged'),
+      this.sb.from('people').select('*'),
+      this.sb.from('deliverables').select('id,project_id,name,status,due_date,sort_order'),
+    ]);
+    this._cache.projects     = projects.data     || [];
+    this._cache.allTasks     = tasks.data        || [];  // slim, overview only
+    this._cache.people       = people.data       || [];
+    this._cache.deliverables = deliverables.data || [];
+    // preserve any project-specific data already loaded
+    if (!this._cache.tasks)        this._cache.tasks = [];
+    if (!this._cache.sprints)      this._cache.sprints = [];
+    if (!this._cache.dependencies) this._cache.dependencies = [];
+    if (!this._cache.meetings)     this._cache.meetings = [];
+    if (!this._cache.meeting_items)      this._cache.meeting_items = [];
+    if (!this._cache.meeting_item_links) this._cache.meeting_item_links = [];
+
+    const errs = [projects, tasks, people, deliverables].map(r=>r.error).filter(Boolean);
+    if (errs.length) console.error('Overview load errors:', errs);
+  }
+
+  // Full load for a specific project
   async load(projectId) {
     const [people, projects, deliverables, sprints, tasks, deps, meetings] = await Promise.all([
       this.sb.from('people').select('*'),
@@ -44,11 +69,12 @@ export class SupabaseAdapter {
     ]);
 
     this._cache = {
-      people:             people.data        || [],
       projects:           projects.data      || [],
+      people:             people.data        || [],
       deliverables:       deliverables.data  || [],
       sprints:            sprints.data       || [],
       tasks:              tasks.data         || [],
+      allTasks:           tasks.data         || [],
       dependencies:       deps.data          || [],
       meetings:           meetings.data      || [],
       meeting_items:      mitems.data        || [],
@@ -58,7 +84,7 @@ export class SupabaseAdapter {
 
     const errs = [people,projects,deliverables,sprints,tasks,deps,meetings,mitems,milinks]
       .map(r=>r.error).filter(Boolean);
-    if (errs.length) console.error('Supabase load errors:', errs);
+    if (errs.length) console.error('Project load errors:', errs);
   }
 
   all(t)       { return this._cache[t] || []; }
@@ -71,7 +97,6 @@ export class SupabaseAdapter {
     this.sb.from(t).insert(rec).then(({ error }) => {
       if (error) {
         console.error(`❌ Insert [${t}] failed:`, error.message);
-        // Remove from cache so the UI is consistent after refresh
         this._cache[t] = (this._cache[t] || []).filter(r => r.id !== rec.id);
       }
     });

@@ -165,3 +165,35 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .g-group-hd td{background:rgba(0,0,0,.025)}
 .g-add-row:hover td{background:rgba(83,74,183,.04)}
 .ctx-item:hover{background:rgba(83,74,183,.06)!important}
+
+/* ── projects overview ── */
+.proj-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.proj-card{background:#fff;border:.5px solid var(--bd);border-radius:12px;padding:18px 20px;
+  cursor:pointer;transition:box-shadow 120ms,border-color 120ms;display:flex;flex-direction:column;gap:14px}
+.proj-card:hover{border-color:#534AB7;box-shadow:0 2px 12px rgba(83,74,183,.12)}
+.proj-card:focus{outline:2px solid #534AB7;outline-offset:2px}
+.new-card{border-style:dashed;border-color:#D1D5DB;background:#FAFAFA}
+.new-card:hover{border-color:#534AB7;background:rgba(83,74,183,.02)}
+.proj-card-top{display:flex;align-items:flex-start;gap:10px}
+.proj-name{font-size:14px;font-weight:500;color:#1A1A22;line-height:1.35;word-break:break-word}
+.proj-client{font-size:12px;color:#9CA3AF;margin-top:2px}
+.proj-status-badge{font-size:10px;font-weight:500;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.proj-prog-wrap{display:flex;align-items:center;gap:10px}
+.proj-prog-bar{flex:1;height:5px;background:rgba(0,0,0,.07);border-radius:3px;overflow:hidden}
+.proj-prog-fill{height:100%;border-radius:3px;transition:width 400ms}
+.proj-pct{font-size:11px;font-family:var(--mono);color:#9CA3AF;flex-shrink:0;min-width:28px;text-align:right}
+.proj-stats-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.proj-stat-chip{font-size:11px;color:#9CA3AF;background:rgba(0,0,0,.04);padding:2px 8px;border-radius:20px;
+  display:inline-flex;align-items:center;gap:4px}
+.proj-stat-chip.danger{color:#A32D2D;background:rgba(226,75,74,.08)}
+.proj-stat-chip.warn{color:#854F0B;background:rgba(186,117,23,.08)}
+.proj-card-foot{display:flex;align-items:center;justify-content:space-between;margin-top:auto}
+.proj-avs{display:flex;align-items:center;gap:-4px}
+.proj-avs span+span{margin-left:-8px}
+.proj-due{font-size:11px;color:#9CA3AF;display:flex;align-items:center;gap:4px;font-family:var(--mono)}
+.proj-due.over{color:#E24B4A}
+/* breadcrumb back link */
+.crumb-back{display:flex;align-items:center;gap:6px;cursor:pointer;padding:3px 6px;border-radius:6px;margin-right:2px}
+.crumb-back:hover{background:rgba(0,0,0,.05)}
+.crumb-back i{font-size:11px;color:#9CA3AF}
+.crumb-back span{font-size:12px;color:#9CA3AF;font-weight:500}
