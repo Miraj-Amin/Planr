@@ -85,13 +85,21 @@ function cellHTML(colId, task, ctx, hasChildren, isCollapsed) {
 }
 
 // ─── row HTML ────────────────────────────────────────────────────────────────
-function rowHTML(task, indent, cols, widths, ctx, hasChildren, isCollapsed) {
-  const bg    = task.type==='phase'       ? 'rgba(83,74,183,.04)'  :
-                task.type==='deliverable' ? 'rgba(29,158,117,.03)' :
-                task.type==='milestone'   ? 'rgba(186,117,23,.03)' : '#fff';
+function rowHTML(task, indent, cols, widths, ctx, hasChildren, isCollapsed, isSelected) {
+  const bg    = isSelected                ? 'rgba(83,74,183,.08)'   :
+                task.type==='phase'       ? 'rgba(83,74,183,.04)'   :
+                task.type==='deliverable' ? 'rgba(29,158,117,.03)'  :
+                task.type==='milestone'   ? 'rgba(186,117,23,.03)'  : '#fff';
   const strip = task.type==='phase'       ? '#534AB7' :
                 task.type==='deliverable' ? '#1D9E75' :
                 task.type==='milestone'   ? '#BA7517' : 'transparent';
+
+  const checkCell = `<td class="g-check-cell" data-id="${task.id}"
+    style="width:36px;min-width:36px;max-width:36px;padding:0;border-bottom:1px solid rgba(0,0,0,.06);
+           border-right:1px solid rgba(0,0,0,.04);text-align:center;background:${bg};cursor:pointer">
+    <input type="checkbox" class="g-check" data-id="${task.id}" ${isSelected?'checked':''}
+      style="cursor:pointer;margin:0;accent-color:#534AB7">
+  </td>`;
 
   const cells = cols.map(colId => {
     const w   = widths[colId];
@@ -107,7 +115,7 @@ function rowHTML(task, indent, cols, widths, ctx, hasChildren, isCollapsed) {
       </div>
     </td>`;
   }).join('');
-  return `<tr class="g-row" data-id="${task.id}">${cells}<td style="border-bottom:1px solid rgba(0,0,0,.06)"></td></tr>`;
+  return `<tr class="g-row" data-id="${task.id}">${checkCell}${cells}<td style="border-bottom:1px solid rgba(0,0,0,.06)"></td></tr>`;
 }
 
 function groupHeaderHTML(label, count, colspan, color='#1D9E75') {
@@ -165,6 +173,56 @@ function outdentTask(taskId, db, allTasks, onRerender) {
   const oldParent = db.get('tasks', task.parent_id);
   db.update('tasks', taskId, { parent_id: oldParent?.parent_id || null });
   rollupParentDates(task.parent_id, db, allTasks);
+  onRerender();
+}
+
+// ─── bulk operations ─────────────────────────────────────────────────────────
+// Indent all selected task ids: each becomes a child of the row above the
+// FIRST (topmost) selected row. The row above is determined from the current
+// visible/hierarchical sort order.
+function bulkIndent(selectedIds, db, allTasks, onRerender) {
+  if (!selectedIds.size) return;
+  const sorted = [...allTasks].sort((a,b) => (a.sort_order||0)-(b.sort_order||0));
+  // Find topmost selected in visual order
+  const firstIdx = sorted.findIndex(t => selectedIds.has(t.id));
+  if (firstIdx <= 0) return;  // nothing above to be parent
+  const parent = sorted[firstIdx - 1];
+  // Don't allow the parent to be one of the selected (avoid cycles)
+  if (selectedIds.has(parent.id)) return;
+  // Also check no selected is an ancestor of parent
+  let cur = parent;
+  while (cur && cur.parent_id) {
+    if (selectedIds.has(cur.parent_id)) return;
+    cur = db.get('tasks', cur.parent_id);
+  }
+  // Apply parent_id to all selected
+  selectedIds.forEach(id => {
+    db.update('tasks', id, { parent_id: parent.id });
+  });
+  rollupParentDates(parent.id, db, db.all('tasks').filter(t => t.project_id === parent.project_id));
+  onRerender();
+}
+
+// Outdent all selected task ids by one level
+function bulkOutdent(selectedIds, db, allTasks, onRerender) {
+  if (!selectedIds.size) return;
+  const projectId = db.get('tasks', [...selectedIds][0])?.project_id;
+  const touchedParents = new Set();
+  selectedIds.forEach(id => {
+    const task = db.get('tasks', id);
+    if (!task || !task.parent_id) return;
+    const oldParent = db.get('tasks', task.parent_id);
+    db.update('tasks', id, { parent_id: oldParent?.parent_id || null });
+    touchedParents.add(task.parent_id);
+  });
+  const all = db.all('tasks').filter(t => t.project_id === projectId);
+  touchedParents.forEach(pid => rollupParentDates(pid, db, all));
+  onRerender();
+}
+
+// Delete all selected
+function bulkDelete(selectedIds, db, onRerender) {
+  selectedIds.forEach(id => db.remove('tasks', id));
   onRerender();
 }
 
@@ -258,6 +316,8 @@ let G = {
   cols:      ALL_COLS.map(c => c.id),
   widths:    Object.fromEntries(ALL_COLS.map(c => [c.id, c.w])),
   collapsed: new Set(),   // task ids whose children are hidden
+  selected:  new Set(),   // task ids currently selected for bulk ops
+  lastClickedId: null,    // for shift+click range selection
 };
 
 // ─── MAIN EXPORT ─────────────────────────────────────────────────────────────
@@ -301,8 +361,16 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     });
 
   const cols = G.cols;
-  const colspan = cols.length + 1;
+  const colspan = cols.length + 2;  // +1 for checkbox, +1 for the trailing filler col
   const ctx = { people, sprints };
+
+  const anySelected = G.selected.size > 0;
+  const allVisibleSelected = tasks.length > 0 && tasks.every(t => G.selected.has(t.id));
+  const checkTh = `<th style="position:sticky;top:0;z-index:2;background:#F0F1F4;
+    border-bottom:1px solid rgba(0,0,0,.1);border-right:1px solid rgba(0,0,0,.06);
+    width:36px;min-width:36px;padding:0;text-align:center;height:32px">
+    <input type="checkbox" id="gCheckAll" ${allVisibleSelected?'checked':''}
+      style="cursor:pointer;margin:0;accent-color:#534AB7"></th>`;
 
   const ths = cols.map(colId => {
     const col = ALL_COLS.find(c => c.id === colId) || { label: colId };
@@ -322,10 +390,16 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     const dl = key !== '__none' ? deliverables.find(d => d.id === key) : null;
     bodyHTML += groupHeaderHTML(group.label, group.rows.length, colspan, dl ? '#1D9E75' : '#9CA3AF');
     group.rows.forEach(({task, indent, hasChildren, isCollapsed}) => {
-      bodyHTML += rowHTML(task, indent, cols, G.widths, ctx, hasChildren, isCollapsed);
+      const isSelected = G.selected.has(task.id);
+      bodyHTML += rowHTML(task, indent, cols, G.widths, ctx, hasChildren, isCollapsed, isSelected);
     });
     bodyHTML += addRowHTML(key, colspan);
   });
+
+  // Preserve scroll position across rerenders
+  const oldScroll = mount.querySelector('#gScroll');
+  const savedScrollTop  = oldScroll ? oldScroll.scrollTop : 0;
+  const savedScrollLeft = oldScroll ? oldScroll.scrollLeft : 0;
 
   mount.innerHTML = `
     <div style="flex:1;overflow:auto;background:#fff;position:relative" id="gScroll">
@@ -336,8 +410,8 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
           <i class="ti ti-chevrons-up" style="font-size:12px"></i>Collapse all</button>
       </div>
       <table id="gTable" style="width:100%;border-collapse:collapse;table-layout:fixed">
-        <colgroup>${cols.map(c => `<col style="width:${G.widths[c]}px">`).join('')}<col></colgroup>
-        <thead><tr>${ths}<th style="background:#F0F1F4;border-bottom:1px solid rgba(0,0,0,.1)"></th></tr></thead>
+        <colgroup><col style="width:36px">${cols.map(c => `<col style="width:${G.widths[c]}px">`).join('')}<col></colgroup>
+        <thead><tr>${checkTh}${ths}<th style="background:#F0F1F4;border-bottom:1px solid rgba(0,0,0,.1)"></th></tr></thead>
         <tbody>${bodyHTML}</tbody>
       </table>
       <div id="gCtx" style="display:none;position:absolute;background:#fff;border:.5px solid rgba(0,0,0,.12);border-radius:9px;box-shadow:0 4px 20px rgba(0,0,0,.14);z-index:200;min-width:220px;padding:4px 0"></div>
@@ -346,6 +420,122 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
   const table  = mount.querySelector('#gTable');
   const scroll = mount.querySelector('#gScroll');
   const ctxEl  = mount.querySelector('#gCtx');
+
+  // Restore scroll position (must happen after innerHTML but before user sees the flash)
+  scroll.scrollTop  = savedScrollTop;
+  scroll.scrollLeft = savedScrollLeft;
+
+  // ─── SELECTION HANDLERS ────────────────────────────────────────────────
+  // Get the visible order of task IDs for shift-click range selection
+  function getVisibleTaskIds() {
+    return [...table.querySelectorAll('.g-row')].map(r => r.dataset.id);
+  }
+
+  // Toggle a single selection
+  function toggleSelect(id) {
+    if (G.selected.has(id)) G.selected.delete(id);
+    else G.selected.add(id);
+    G.lastClickedId = id;
+    onRerender();
+  }
+
+  // Range selection between last clicked and new
+  function rangeSelect(id) {
+    const ids = getVisibleTaskIds();
+    const last = G.lastClickedId;
+    if (!last) { toggleSelect(id); return; }
+    const iStart = ids.indexOf(last);
+    const iEnd   = ids.indexOf(id);
+    if (iStart === -1 || iEnd === -1) { toggleSelect(id); return; }
+    const [lo, hi] = [Math.min(iStart, iEnd), Math.max(iStart, iEnd)];
+    for (let i = lo; i <= hi; i++) G.selected.add(ids[i]);
+    G.lastClickedId = id;
+    onRerender();
+  }
+
+  // Handle checkbox clicks — support click (single), shift+click (range), cmd+click (toggle)
+  table.addEventListener('click', e => {
+    const check = e.target.closest('.g-check');
+    if (!check) return;
+    e.stopPropagation();
+    const id = check.dataset.id;
+    if (e.shiftKey) {
+      rangeSelect(id);
+    } else {
+      toggleSelect(id);
+    }
+  });
+
+  // Also allow clicking anywhere on the check cell (not just the tiny checkbox)
+  table.addEventListener('click', e => {
+    if (e.target.closest('.g-check')) return;  // handled above
+    const cell = e.target.closest('.g-check-cell');
+    if (!cell) return;
+    e.stopPropagation();
+    const id = cell.dataset.id;
+    if (e.shiftKey) rangeSelect(id);
+    else toggleSelect(id);
+  });
+
+  // Select all checkbox
+  const checkAll = mount.querySelector('#gCheckAll');
+  if (checkAll) {
+    checkAll.addEventListener('click', e => {
+      e.stopPropagation();
+      if (checkAll.checked) {
+        tasks.forEach(t => G.selected.add(t.id));
+      } else {
+        G.selected.clear();
+      }
+      G.lastClickedId = null;
+      onRerender();
+    });
+  }
+
+  // ─── FLOATING ACTION BAR ───────────────────────────────────────────────
+  if (G.selected.size > 0) {
+    const bar = document.createElement('div');
+    bar.style.cssText = `position:absolute;bottom:20px;left:50%;transform:translateX(-50%);
+      background:#1A1A22;color:#fff;padding:10px 8px 10px 18px;border-radius:10px;
+      box-shadow:0 8px 32px rgba(0,0,0,.24);z-index:150;display:flex;align-items:center;gap:4px;
+      font-size:13px;font-weight:500`;
+    bar.innerHTML = `
+      <span style="margin-right:14px;color:#E0E0E5">${G.selected.size} selected</span>
+      <button data-act="indent"  style="background:transparent;border:0;color:#fff;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:12.5px;display:flex;align-items:center;gap:5px">
+        <i class="ti ti-indent-increase" style="font-size:14px"></i>Indent</button>
+      <button data-act="outdent" style="background:transparent;border:0;color:#fff;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:12.5px;display:flex;align-items:center;gap:5px">
+        <i class="ti ti-indent-decrease" style="font-size:14px"></i>Outdent</button>
+      <button data-act="delete"  style="background:transparent;border:0;color:#FCA5A5;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:12.5px;display:flex;align-items:center;gap:5px">
+        <i class="ti ti-trash" style="font-size:14px"></i>Delete</button>
+      <span style="width:1px;height:20px;background:rgba(255,255,255,.15);margin:0 4px"></span>
+      <button data-act="clear"   style="background:transparent;border:0;color:#9CA3AF;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:12.5px">Clear</button>
+    `;
+    bar.querySelectorAll('button').forEach(b => {
+      b.addEventListener('mouseover', () => b.style.background = 'rgba(255,255,255,.08)');
+      b.addEventListener('mouseout',  () => b.style.background = 'transparent');
+    });
+    bar.addEventListener('click', e => {
+      const btn = e.target.closest('button');
+      if (!btn) return;
+      const act = btn.dataset.act;
+      const allTasks = db.all('tasks').filter(t => t.project_id === projectId);
+      if (act === 'indent') {
+        bulkIndent(new Set(G.selected), db, allTasks, onRerender);
+      } else if (act === 'outdent') {
+        bulkOutdent(new Set(G.selected), db, allTasks, onRerender);
+      } else if (act === 'delete') {
+        if (confirm(`Delete ${G.selected.size} task${G.selected.size===1?'':'s'}?`)) {
+          bulkDelete(new Set(G.selected), db, onRerender);
+          G.selected.clear();
+        }
+      } else if (act === 'clear') {
+        G.selected.clear();
+        onRerender();
+      }
+    });
+    scroll.appendChild(bar);
+  }
+
 
   // ─── expand/collapse all ─────────────────────────────────────────────
   mount.querySelector('#gExpandAll').addEventListener('click', () => {
