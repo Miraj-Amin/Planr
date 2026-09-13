@@ -96,7 +96,16 @@ export class SupabaseAdapter {
     (this._cache[t] = this._cache[t] || []).push(rec);
     this.sb.from(t).insert(rec).then(({ error }) => {
       if (error) {
-        console.error(`❌ Insert [${t}] failed:`, error.message);
+        console.error(`❌ Insert [${t}] failed:`, error.message, rec);
+        // Show user-facing error since the row will vanish on next refresh
+        if (typeof window !== 'undefined') {
+          const msg = `Couldn't save to ${t}: ${error.message}`;
+          // Debounce so multiple failures don't spam
+          if (!this._lastErr || Date.now() - this._lastErr > 2000) {
+            this._lastErr = Date.now();
+            alert(msg);
+          }
+        }
         this._cache[t] = (this._cache[t] || []).filter(r => r.id !== rec.id);
       }
     });
