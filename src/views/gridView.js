@@ -1,7 +1,7 @@
 // gridView.js — spreadsheet grid for the Plan tab.
-// ARCHITECTURE: Every editable cell renders as a live <select> or <input>.
-// No activate/deactivate lifecycle — the editor IS the display. This is
-// the simplest possible pattern that guarantees dropdowns and inputs work.
+// Every editable cell is a live <select> or <input> — no activate/deactivate.
+// Features: inline editing, drag-and-drop rows (moves whole subtree),
+// collapsible parents, right-click context menu, indent/outdent.
 
 import { fmt } from '../lib/dates.js';
 
@@ -18,28 +18,16 @@ const ALL_COLS = [
   { id:'progress',   label:'%',       w:80  },
 ];
 
-const STATUSES = [
-  ['todo','To do'], ['in-progress','In progress'], ['blocked','Blocked'],
-  ['review','Review'], ['done','Done'],
-];
-const TYPES = [
-  ['task','Task'], ['deliverable','Deliverable'], ['milestone','Milestone'],
-  ['phase','Phase'], ['agenda','Agenda'], ['followup','Follow-up'],
-];
-const EFFORT = [
-  [0,'—'], [15,'15m'], [30,'30m'], [60,'1h'], [120,'2h'],
-  [240,'4h'], [480,'1d'], [960,'2d'], [2400,'1w'],
-];
+const STATUSES = [['todo','To do'],['in-progress','In progress'],['blocked','Blocked'],['review','Review'],['done','Done']];
+const TYPES    = [['task','Task'],['deliverable','Deliverable'],['milestone','Milestone'],['phase','Phase'],['agenda','Agenda'],['followup','Follow-up']];
+const EFFORT   = [[0,'—'],[15,'15m'],[30,'30m'],[60,'1h'],[120,'2h'],[240,'4h'],[480,'1d'],[960,'2d'],[2400,'1w']];
 
-// Safe monotonic sort_order counter — fits in int
 let _sortSeq = 1_000_000;
 const nextSort = () => ++_sortSeq;
 
-// ─── build a cell's HTML content ─────────────────────────────────────────────
-function cellHTML(colId, task, ctx) {
+// ─── cell HTML ───────────────────────────────────────────────────────────────
+function cellHTML(colId, task, ctx, hasChildren, isCollapsed) {
   const { people, sprints } = ctx;
-
-  // Base styles for inline editors — no borders, blend with cell
   const baseStyle = 'border:0;outline:0;background:transparent;font-family:inherit;font-size:13px;color:#1A1A22;width:100%;height:100%;padding:0;cursor:pointer';
 
   switch (colId) {
@@ -47,7 +35,17 @@ function cellHTML(colId, task, ctx) {
       const bold = task.type==='phase'      ? 'font-weight:600;color:#3C3489' :
                    task.type==='deliverable'? 'font-weight:500;color:#0F6E56' :
                    task.type==='milestone'  ? 'font-weight:500;color:#854F0B' : '';
-      return `<input type="text" class="g-in" data-id="${task.id}" data-col="name"
+      const chevron = hasChildren
+        ? `<span class="g-chev" data-id="${task.id}" style="cursor:pointer;color:#9CA3AF;
+             font-size:10px;margin-right:2px;user-select:none;width:12px;flex-shrink:0;
+             display:inline-flex;align-items:center;justify-content:center">
+             ${isCollapsed ? '▶' : '▼'}
+           </span>`
+        : `<span style="width:12px;flex-shrink:0"></span>`;
+      const dragHandle = `<span class="g-drag" data-id="${task.id}" draggable="true"
+        style="opacity:0;cursor:grab;color:#C4C9D4;font-size:14px;margin-right:4px;user-select:none;
+               width:14px;flex-shrink:0;transition:opacity 100ms;line-height:1">⋮⋮</span>`;
+      return `${chevron}${dragHandle}<input type="text" class="g-in" data-id="${task.id}" data-col="name"
         value="${(task.name||'').replace(/"/g,'&quot;')}" placeholder="Untitled task"
         style="${baseStyle};${bold};cursor:text">`;
     }
@@ -57,8 +55,7 @@ function cellHTML(colId, task, ctx) {
     }
     case 'owner_id': {
       const blank = `<option value="" ${!task.owner_id?'selected':''}>Unassigned</option>`;
-      const opts = people.map(p =>
-        `<option value="${p.id}" ${p.id===task.owner_id?'selected':''}>${p.name}${p.is_client?' (client)':''}</option>`).join('');
+      const opts = people.map(p => `<option value="${p.id}" ${p.id===task.owner_id?'selected':''}>${p.name}${p.is_client?' (client)':''}</option>`).join('');
       return `<select class="g-in" data-id="${task.id}" data-col="owner_id" style="${baseStyle}">${blank}${opts}</select>`;
     }
     case 'type': {
@@ -77,8 +74,7 @@ function cellHTML(colId, task, ctx) {
     }
     case 'sprint_id': {
       const blank = `<option value="" ${!task.sprint_id?'selected':''}>Backlog</option>`;
-      const opts = sprints.map(s =>
-        `<option value="${s.id}" ${s.id===task.sprint_id?'selected':''}>${s.name}</option>`).join('');
+      const opts = sprints.map(s => `<option value="${s.id}" ${s.id===task.sprint_id?'selected':''}>${s.name}</option>`).join('');
       return `<select class="g-in" data-id="${task.id}" data-col="sprint_id" style="${baseStyle}">${blank}${opts}</select>`;
     }
     case 'progress':
@@ -89,7 +85,7 @@ function cellHTML(colId, task, ctx) {
 }
 
 // ─── row HTML ────────────────────────────────────────────────────────────────
-function rowHTML(task, indent, cols, widths) {
+function rowHTML(task, indent, cols, widths, ctx, hasChildren, isCollapsed) {
   const bg    = task.type==='phase'       ? 'rgba(83,74,183,.04)'  :
                 task.type==='deliverable' ? 'rgba(29,158,117,.03)' :
                 task.type==='milestone'   ? 'rgba(186,117,23,.03)' : '#fff';
@@ -106,8 +102,8 @@ function rowHTML(task, indent, cols, widths) {
       style="position:relative;height:38px;padding:0;border-bottom:1px solid rgba(0,0,0,.06);
              border-right:1px solid rgba(0,0,0,.04);width:${w}px;min-width:${w}px;max-width:${w}px;overflow:hidden;background:${bg}">
       ${stripEl}
-      <div class="g-inner" style="display:flex;align-items:center;padding:0 8px 0 ${ipl}px;height:100%;overflow:hidden">
-        ${cellHTML(colId, task, {people:[], sprints:[]})}
+      <div class="g-inner" style="display:flex;align-items:center;padding:0 8px 0 ${ipl}px;height:100%;overflow:hidden;gap:2px">
+        ${cellHTML(colId, task, ctx, hasChildren, isCollapsed)}
       </div>
     </td>`;
   }).join('');
@@ -172,31 +168,130 @@ function outdentTask(taskId, db, allTasks, onRerender) {
   onRerender();
 }
 
-// Grid column state (persists across rerenders)
+// ─── descendants helper ──────────────────────────────────────────────────────
+function getDescendantIds(taskId, allTasks) {
+  const ids = new Set();
+  const stack = [taskId];
+  while (stack.length) {
+    const id = stack.pop();
+    for (const t of allTasks) {
+      if (t.parent_id === id && !ids.has(t.id)) {
+        ids.add(t.id);
+        stack.push(t.id);
+      }
+    }
+  }
+  return ids;
+}
+
+// ─── move task (drag & drop) ─────────────────────────────────────────────────
+// Move `taskId` (and its whole subtree) to sit ABOVE `targetId`, at same
+// depth as targetId. If targetId has a parent, this task adopts that parent.
+// Does not move a task inside its own descendants.
+function moveTaskAbove(taskId, targetId, db, allTasks, onRerender) {
+  if (taskId === targetId) return;
+  const desc = getDescendantIds(taskId, allTasks);
+  if (desc.has(targetId)) return; // can't move into own subtree
+  const task   = db.get('tasks', taskId);
+  const target = db.get('tasks', targetId);
+  if (!task || !target) return;
+
+  const newParent = target.parent_id || null;
+  const oldParent = task.parent_id;
+
+  // Give this task a sort_order just below target's, above target
+  const targetSort = target.sort_order || 0;
+  // find target's neighbor above at same level
+  const siblings = allTasks
+    .filter(t => (t.parent_id||null) === (newParent||null))
+    .sort((a,b) => (a.sort_order||0)-(b.sort_order||0));
+  const targetIdx = siblings.findIndex(s => s.id === targetId);
+  const above = targetIdx > 0 ? siblings[targetIdx-1] : null;
+  const newSort = above
+    ? Math.floor(((above.sort_order||0) + targetSort) / 2)
+    : targetSort - 100;
+
+  // If newSort would be <= 0, we need to shift up other tasks
+  // Simpler: use a positive fractional-like approach with big spacing
+  let finalSort = newSort;
+  if (finalSort <= 0) {
+    // Shift all siblings up by 1000, then place at (targetSort - 500)
+    siblings.forEach(sib => {
+      if (sib.id !== taskId) {
+        db.update('tasks', sib.id, { sort_order: (sib.sort_order || 0) + 1000 });
+      }
+    });
+    finalSort = (target.sort_order || 0) - 500 + 1000; // target got shifted too
+    // But wait - we already read siblings before shift; recompute for accuracy
+    // Actually easier: just use (target's new sort - 500)
+    const targetNow = db.get('tasks', targetId);
+    finalSort = (targetNow.sort_order || 0) - 500;
+  }
+  const patch = { parent_id: newParent, sort_order: finalSort };
+  db.update('tasks', taskId, patch);
+
+  // Rollup old & new parents
+  if (oldParent) rollupParentDates(oldParent, db, db.all('tasks').filter(t => t.project_id === task.project_id));
+  if (newParent) rollupParentDates(newParent, db, db.all('tasks').filter(t => t.project_id === task.project_id));
+  onRerender();
+}
+
+// Same but places task INSIDE targetId (as last child)
+function moveTaskInside(taskId, targetId, db, allTasks, onRerender) {
+  if (taskId === targetId) return;
+  const desc = getDescendantIds(taskId, allTasks);
+  if (desc.has(targetId)) return;
+  const task = db.get('tasks', taskId);
+  if (!task) return;
+
+  const oldParent = task.parent_id;
+  const patch = { parent_id: targetId, sort_order: nextSort() };
+  db.update('tasks', taskId, patch);
+
+  if (oldParent) rollupParentDates(oldParent, db, db.all('tasks').filter(t => t.project_id === task.project_id));
+  rollupParentDates(targetId, db, db.all('tasks').filter(t => t.project_id === task.project_id));
+  onRerender();
+}
+
+// ─── state that persists across rerenders ───────────────────────────────────
 let G = {
-  cols:   ALL_COLS.map(c => c.id),
-  widths: Object.fromEntries(ALL_COLS.map(c => [c.id, c.w])),
+  cols:      ALL_COLS.map(c => c.id),
+  widths:    Object.fromEntries(ALL_COLS.map(c => [c.id, c.w])),
+  collapsed: new Set(),   // task ids whose children are hidden
 };
 
 // ─── MAIN EXPORT ─────────────────────────────────────────────────────────────
 export function renderGrid({ mount, tasks, people, deliverables, sprints, db, projectId, onSelect, onRerender }) {
 
-  // Bump sort seq past any existing values
-  _sortSeq = Math.max(_sortSeq, ...tasks.map(t=>t.sort_order||0));
+  _sortSeq = Math.max(_sortSeq, ...tasks.map(t => t.sort_order || 0));
 
-  // Build hierarchy
+  // Precompute which tasks have children (for chevron rendering)
+  const childrenOf = new Map();
+  tasks.forEach(t => {
+    if (t.parent_id) {
+      if (!childrenOf.has(t.parent_id)) childrenOf.set(t.parent_id, []);
+      childrenOf.get(t.parent_id).push(t);
+    }
+  });
+
+  // Build visible hierarchy respecting collapsed state
   function collectRows(taskId, indent) {
     const t = tasks.find(x => x.id === taskId);
     if (!t) return [];
-    const children = tasks.filter(x => x.parent_id === taskId)
-      .sort((a,b) => (a.sort_order||0)-(b.sort_order||0));
-    return [{task: t, indent}, ...children.flatMap(c => collectRows(c.id, indent+1))];
+    const hasKids = childrenOf.has(taskId);
+    const isCollapsed = G.collapsed.has(taskId);
+    const rows = [{ task: t, indent, hasChildren: hasKids, isCollapsed }];
+    if (!isCollapsed && hasKids) {
+      const kids = [...childrenOf.get(taskId)].sort((a,b) => (a.sort_order||0)-(b.sort_order||0));
+      for (const c of kids) rows.push(...collectRows(c.id, indent + 1));
+    }
+    return rows;
   }
 
   // Group by deliverable
   const groups = new Map();
-  [...deliverables].sort((a,b) => (a.sort_order||0)-(b.sort_order||0)).forEach(d =>
-    groups.set(d.id, { label: d.name, rows: [] }));
+  [...deliverables].sort((a,b) => (a.sort_order||0)-(b.sort_order||0))
+    .forEach(d => groups.set(d.id, { label: d.name, rows: [] }));
   groups.set('__none', { label: 'No deliverable', rows: [] });
   tasks.filter(t => !t.parent_id)
     .sort((a,b) => (a.sort_order||0)-(b.sort_order||0))
@@ -205,9 +300,10 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
       groups.get(key).rows.push(...collectRows(t.id, 0));
     });
 
-  // Header
   const cols = G.cols;
   const colspan = cols.length + 1;
+  const ctx = { people, sprints };
+
   const ths = cols.map(colId => {
     const col = ALL_COLS.find(c => c.id === colId) || { label: colId };
     return `<th data-col="${colId}"
@@ -220,19 +316,25 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     </th>`;
   }).join('');
 
-  // Body
   let bodyHTML = '';
-  const rowRenderCtx = { people, sprints };
   groups.forEach((group, key) => {
     if (!group.rows.length && key !== '__none') return;
     const dl = key !== '__none' ? deliverables.find(d => d.id === key) : null;
     bodyHTML += groupHeaderHTML(group.label, group.rows.length, colspan, dl ? '#1D9E75' : '#9CA3AF');
-    group.rows.forEach(({task, indent}) => { bodyHTML += rowHTMLwithCtx(task, indent, cols, G.widths, rowRenderCtx); });
+    group.rows.forEach(({task, indent, hasChildren, isCollapsed}) => {
+      bodyHTML += rowHTML(task, indent, cols, G.widths, ctx, hasChildren, isCollapsed);
+    });
     bodyHTML += addRowHTML(key, colspan);
   });
 
   mount.innerHTML = `
     <div style="flex:1;overflow:auto;background:#fff;position:relative" id="gScroll">
+      <div style="padding:8px 14px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(0,0,0,.06);background:#F8F9FB">
+        <button class="g-tool" id="gExpandAll" style="border:0;background:transparent;font-size:11px;color:#6B7280;cursor:pointer;display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:5px">
+          <i class="ti ti-chevrons-down" style="font-size:12px"></i>Expand all</button>
+        <button class="g-tool" id="gCollapseAll" style="border:0;background:transparent;font-size:11px;color:#6B7280;cursor:pointer;display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:5px">
+          <i class="ti ti-chevrons-up" style="font-size:12px"></i>Collapse all</button>
+      </div>
       <table id="gTable" style="width:100%;border-collapse:collapse;table-layout:fixed">
         <colgroup>${cols.map(c => `<col style="width:${G.widths[c]}px">`).join('')}<col></colgroup>
         <thead><tr>${ths}<th style="background:#F0F1F4;border-bottom:1px solid rgba(0,0,0,.1)"></th></tr></thead>
@@ -245,8 +347,30 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
   const scroll = mount.querySelector('#gScroll');
   const ctxEl  = mount.querySelector('#gCtx');
 
-  // ─── SAVE HANDLERS ─────────────────────────────────────────────────────
-  // ONE handler using event delegation. Fires on every input/select change.
+  // ─── expand/collapse all ─────────────────────────────────────────────
+  mount.querySelector('#gExpandAll').addEventListener('click', () => {
+    G.collapsed.clear();
+    onRerender();
+  });
+  mount.querySelector('#gCollapseAll').addEventListener('click', () => {
+    // Collapse every task that has children
+    G.collapsed.clear();
+    tasks.forEach(t => { if (childrenOf.has(t.id)) G.collapsed.add(t.id); });
+    onRerender();
+  });
+
+  // ─── chevron toggle ────────────────────────────────────────────────────
+  table.addEventListener('click', e => {
+    const chev = e.target.closest('.g-chev');
+    if (!chev) return;
+    e.stopPropagation();
+    const id = chev.dataset.id;
+    if (G.collapsed.has(id)) G.collapsed.delete(id);
+    else G.collapsed.add(id);
+    onRerender();
+  });
+
+  // ─── change → save ─────────────────────────────────────────────────────
   table.addEventListener('change', e => {
     const el = e.target.closest('.g-in');
     if (!el) return;
@@ -256,9 +380,9 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     if (!task) return;
 
     let value;
-    if (el.type === 'number')      value = el.value === '' ? null : +el.value;
-    else if (el.type === 'date')   value = el.value || null;
-    else                           value = el.value === '' ? null : el.value;
+    if (el.type === 'number')    value = el.value === '' ? null : +el.value;
+    else if (el.type === 'date') value = el.value || null;
+    else                         value = el.value === '' ? null : el.value;
 
     const patch = { [colId]: value };
     if (colId === 'progress' && value != null && value >= 100) patch.status = 'done';
@@ -268,32 +392,26 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     if ((colId === 'start_date' || colId === 'end_date') && task.parent_id) {
       rollupParentDates(task.parent_id, db, db.all('tasks').filter(t => t.project_id === projectId));
     }
-
-    // Only rerender the whole grid on type change (affects row style)
-    // or date change (affects parent rollup display).
     if (colId === 'type' || colId === 'start_date' || colId === 'end_date') {
       onRerender();
     }
   });
 
-  // Name is a text input — save on blur or Enter
+  // Name text input — save on blur
   table.addEventListener('blur', e => {
     const el = e.target.closest('.g-in');
     if (!el || el.dataset.col !== 'name') return;
-    const taskId = el.dataset.id;
-    const task = db.get('tasks', taskId);
+    const task = db.get('tasks', el.dataset.id);
     if (!task) return;
-    if ((task.name || '') !== el.value) {
-      db.update('tasks', taskId, { name: el.value });
-    }
+    if ((task.name || '') !== el.value) db.update('tasks', el.dataset.id, { name: el.value });
   }, true);
 
+  // Enter = new row below, Tab = indent/outdent
   table.addEventListener('keydown', e => {
     const el = e.target.closest('.g-in');
-    if (!el) return;
-    if (e.key === 'Enter' && el.dataset.col === 'name') {
+    if (!el || el.dataset.col !== 'name') return;
+    if (e.key === 'Enter') {
       e.preventDefault();
-      // save & insert row below
       const taskId = el.dataset.id;
       const task = db.get('tasks', taskId);
       if (task) db.update('tasks', taskId, { name: el.value });
@@ -306,12 +424,10 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
         sort_order: nextSort(),
       });
       onRerender();
-      // Focus new row's name input
       requestAnimationFrame(() => {
-        const newInput = mount.querySelector(`.g-in[data-id="${newTask.id}"][data-col="name"]`);
-        if (newInput) newInput.focus();
+        mount.querySelector(`.g-in[data-id="${newTask.id}"][data-col="name"]`)?.focus();
       });
-    } else if (e.key === 'Tab' && el.dataset.col === 'name') {
+    } else if (e.key === 'Tab') {
       e.preventDefault();
       const taskId = el.dataset.id;
       const task = db.get('tasks', taskId);
@@ -320,6 +436,89 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
       if (e.shiftKey) outdentTask(taskId, db, allTasks, onRerender);
       else indentTask(taskId, db, allTasks, onRerender);
     }
+  });
+
+  // ─── hover drag handle ─────────────────────────────────────────────────
+  table.addEventListener('mouseover', e => {
+    const row = e.target.closest('.g-row');
+    if (row) row.querySelectorAll('.g-drag').forEach(h => h.style.opacity = '1');
+  });
+  table.addEventListener('mouseout', e => {
+    const row = e.target.closest('.g-row');
+    if (row && !row.matches(':hover')) row.querySelectorAll('.g-drag').forEach(h => h.style.opacity = '0');
+  });
+
+  // ─── DRAG AND DROP ─────────────────────────────────────────────────────
+  let dragId = null;
+  let dropIndicator = null;
+
+  function makeIndicator() {
+    if (dropIndicator) return dropIndicator;
+    dropIndicator = document.createElement('div');
+    dropIndicator.style.cssText = 'position:absolute;height:3px;background:#534AB7;border-radius:2px;pointer-events:none;z-index:100;left:0;right:0;box-shadow:0 0 0 1px rgba(83,74,183,.3)';
+    scroll.appendChild(dropIndicator);
+    return dropIndicator;
+  }
+  function hideIndicator() {
+    if (dropIndicator) dropIndicator.style.display = 'none';
+  }
+
+  table.addEventListener('dragstart', e => {
+    const handle = e.target.closest('.g-drag');
+    if (!handle) { e.preventDefault(); return; }
+    const row = handle.closest('.g-row');
+    if (!row) { e.preventDefault(); return; }
+    dragId = row.dataset.id;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragId);
+    row.style.opacity = '0.4';
+    row.dataset.dragging = '1';
+  });
+
+  table.addEventListener('dragend', e => {
+    table.querySelectorAll('[data-dragging="1"]').forEach(r => {
+      r.style.opacity = '';
+      delete r.dataset.dragging;
+    });
+    dragId = null;
+    hideIndicator();
+  });
+
+  table.addEventListener('dragover', e => {
+    if (!dragId) return;
+    const row = e.target.closest('.g-row');
+    if (!row) return;
+    if (row.dataset.id === dragId) return;
+
+    // Can't drop on own descendant
+    const allTasks = db.all('tasks').filter(t => t.project_id === projectId);
+    const desc = getDescendantIds(dragId, allTasks);
+    if (desc.has(row.dataset.id)) return;
+
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+
+    // Position indicator at top of hover row
+    const rect  = row.getBoundingClientRect();
+    const sRect = scroll.getBoundingClientRect();
+    const ind   = makeIndicator();
+    ind.style.display = 'block';
+    ind.style.top   = `${rect.top - sRect.top + scroll.scrollTop - 1}px`;
+    ind.style.left  = `${rect.left - sRect.left}px`;
+    ind.style.width = `${rect.width}px`;
+  });
+
+  table.addEventListener('drop', e => {
+    if (!dragId) return;
+    const row = e.target.closest('.g-row');
+    if (!row) return;
+    e.preventDefault();
+    const targetId = row.dataset.id;
+    if (targetId === dragId) { hideIndicator(); return; }
+    const allTasks = db.all('tasks').filter(t => t.project_id === projectId);
+    moveTaskAbove(dragId, targetId, db, allTasks, onRerender);
+    hideIndicator();
+    dragId = null;
   });
 
   // ─── + Add task row ────────────────────────────────────────────────────
@@ -335,8 +534,7 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     });
     onRerender();
     requestAnimationFrame(() => {
-      const newInput = mount.querySelector(`.g-in[data-id="${newTask.id}"][data-col="name"]`);
-      if (newInput) newInput.focus();
+      mount.querySelector(`.g-in[data-id="${newTask.id}"][data-col="name"]`)?.focus();
     });
   });
 
@@ -354,12 +552,15 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     const sorted = [...allTasks].sort((a,b) => (a.sort_order||0)-(b.sort_order||0));
     const idx = sorted.findIndex(t => t.id === taskId);
     const above = idx > 0 ? sorted[idx-1] : null;
+    const hasKids = childrenOf.has(taskId);
 
     const items = [
       {label:`<i class="ti ti-subtask"></i> Mark as <b>task</b>`,        dim:task.type==='task',        action:()=>{db.update('tasks',taskId,{type:'task'});onRerender();hideCtx();}},
       {label:`<i class="ti ti-package"></i> Mark as <b>deliverable</b>`, dim:task.type==='deliverable', action:()=>{db.update('tasks',taskId,{type:'deliverable'});onRerender();hideCtx();}},
       {label:`<i class="ti ti-diamond"></i> Mark as <b>milestone</b>`,   dim:task.type==='milestone',   action:()=>{db.update('tasks',taskId,{type:'milestone'});onRerender();hideCtx();}},
       null,
+      hasKids ? {label:`<i class="ti ti-fold"></i> ${G.collapsed.has(taskId) ? 'Expand' : 'Collapse'} children`, action:()=>{if(G.collapsed.has(taskId))G.collapsed.delete(taskId);else G.collapsed.add(taskId);onRerender();hideCtx();}} : null,
+      hasKids ? null : undefined,
       {label:`<i class="ti ti-plus"></i> Insert row above`, action:()=>{
         const t = db.insert('tasks',{project_id:projectId,type:'task',name:'',status:'todo',parent_id:task.parent_id||null,deliverable_id:task.deliverable_id||null,effort_min:0,priority:'normal',progress:0,flagged:false,sort_order:(task.sort_order||nextSort())-1});
         onRerender(); hideCtx();
@@ -377,7 +578,7 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
       {label:`<i class="ti ti-message-circle"></i> ${task.flagged?'Remove from agenda':'Flag for meeting'}`, action:()=>{db.update('tasks',taskId,{flagged:!task.flagged});onRerender();hideCtx();}},
       null,
       {label:`<i class="ti ti-trash" style="color:#E24B4A"></i> <span style="color:#E24B4A">Delete task</span>`, action:()=>{if(confirm(`Delete "${task.name||'this task'}"?`)){db.remove('tasks',taskId);onRerender();}hideCtx();}},
-    ];
+    ].filter(x => x !== undefined);
 
     const rect = scroll.getBoundingClientRect();
     ctxEl.innerHTML = items.map(item => item === null
@@ -401,30 +602,4 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
   });
 
   document.addEventListener('mousedown', e => { if (!e.target.closest('#gCtx')) hideCtx(); });
-}
-
-// wrapper that uses shared row renderer with proper ctx
-function rowHTMLwithCtx(task, indent, cols, widths, ctx) {
-  const bg    = task.type==='phase'       ? 'rgba(83,74,183,.04)'  :
-                task.type==='deliverable' ? 'rgba(29,158,117,.03)' :
-                task.type==='milestone'   ? 'rgba(186,117,23,.03)' : '#fff';
-  const strip = task.type==='phase'       ? '#534AB7' :
-                task.type==='deliverable' ? '#1D9E75' :
-                task.type==='milestone'   ? '#BA7517' : 'transparent';
-
-  const cells = cols.map(colId => {
-    const w   = widths[colId];
-    const ipl = colId === 'name' ? 14 + indent*20 : 8;
-    const stripEl = colId==='name'
-      ? `<span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:${strip}"></span>` : '';
-    return `<td class="g-cell" data-id="${task.id}" data-col="${colId}"
-      style="position:relative;height:38px;padding:0;border-bottom:1px solid rgba(0,0,0,.06);
-             border-right:1px solid rgba(0,0,0,.04);width:${w}px;min-width:${w}px;max-width:${w}px;overflow:hidden;background:${bg}">
-      ${stripEl}
-      <div class="g-inner" style="display:flex;align-items:center;padding:0 8px 0 ${ipl}px;height:100%;overflow:hidden">
-        ${cellHTML(colId, task, ctx)}
-      </div>
-    </td>`;
-  }).join('');
-  return `<tr class="g-row" data-id="${task.id}">${cells}<td style="border-bottom:1px solid rgba(0,0,0,.06)"></td></tr>`;
 }
