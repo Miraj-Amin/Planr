@@ -94,7 +94,7 @@ export function newTaskForm(db, projectId, opts={}, onDone) {
         end_date:       data.end_date       || null,
         effort_min:     +data.effort_min    || 0,
         priority:       data.priority,
-        flagged:        false, progress: 0, sort_order: Date.now(),
+        flagged:        false, progress: 0, sort_order: (Date.now() % 2000000000),
       });
       onDone(task);
     },
@@ -115,7 +115,7 @@ export function newPhaseForm(db, projectId, onDone) {
       const phase = db.insert('tasks', {
         project_id:projectId, type:'phase', name:data.name,
         start_date:data.start_date||null, end_date:data.end_date||null,
-        status:'todo', progress:0, sort_order:Date.now(),
+        status:'todo', progress:0, sort_order: (Date.now() % 2000000000),
       });
       onDone(phase);
     },
@@ -136,7 +136,7 @@ export function newDeliverableForm(db, projectId, onDone) {
       const dl = db.insert('deliverables', {
         project_id:projectId, name:data.name,
         due_date:data.due_date||null, description:data.description||null,
-        status:'todo', sort_order:Date.now(),
+        status:'todo', sort_order: (Date.now() % 2000000000),
       });
       onDone(dl);
     },
@@ -193,7 +193,7 @@ export function newMeetingItemForm(db, projectId, meetingId, kind, onDone) {
         project_id:projectId, type:kind, name:data.name, notes:data.notes||null,
         status:'todo', owner_id:data.owner_id||null,
         end_date:data.end_date||null, start_date:new Date().toISOString().slice(0,10),
-        effort_min:0, priority:'normal', progress:0, flagged:true, sort_order:Date.now(),
+        effort_min:0, priority:'normal', progress:0, flagged:true, sort_order: (Date.now() % 2000000000),
       });
       const mi = db.insert('meeting_items', { task_id:task.id, kind, resolved:false, carried_from:null });
       db.insert('meeting_item_links', { meeting_item_id:mi.id, meeting_id:meetingId });
@@ -223,7 +223,7 @@ export function quickTaskForm(db, projectId, defaults={}, onDone) {
         project_id:projectId, type:'task', name:data.name,
         status:defaults.status||'todo', owner_id:data.owner_id||null,
         end_date:data.end_date||null, sprint_id:data.sprint_id||null,
-        effort_min:0, priority:'normal', progress:0, flagged:false, sort_order:Date.now(),
+        effort_min:0, priority:'normal', progress:0, flagged:false, sort_order: (Date.now() % 2000000000),
         ...defaults,
       });
       onDone(task);
