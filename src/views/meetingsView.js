@@ -94,7 +94,7 @@ export function renderMeetings({mount,meetings,meeting_items,meeting_item_links,
         <span class="secbadge" style="background:${openA?'rgba(55,138,221,.12)':'rgba(29,158,117,.1)'};color:${openA?'#185FA5':'#1D9E75'}">${openA?openA+' open':'all covered'}</span>
       </div>
       ${agenda.length?agenda.map(itemHTML).join(''):'<div class="empty">No agenda items yet.</div>'}
-      <div class="secadd"><i class="ti ti-plus" style="font-size:12px"></i>Add agenda item</div>
+      <div class="secadd" id="add-agenda-btn"><i class="ti ti-plus" style="font-size:12px"></i>Add agenda item</div>
     </div>
     <div class="sec">
       <div class="sech"><i class="ti ti-arrow-forward" style="font-size:14px;color:#D4716A"></i>
@@ -102,11 +102,13 @@ export function renderMeetings({mount,meetings,meeting_items,meeting_item_links,
         <span class="secbadge" style="background:${openF?'rgba(212,113,106,.14)':'rgba(29,158,117,.1)'};color:${openF?'#993C1D':'#1D9E75'}">${openF?openF+' open':'all closed'}</span>
       </div>
       ${follow.length?follow.map(itemHTML).join(''):'<div class="empty">No follow-ups captured.</div>'}
-      <div class="secadd"><i class="ti ti-plus" style="font-size:12px"></i>Capture follow-up</div>
+      <div class="secadd" id="add-followup-btn"><i class="ti ti-plus" style="font-size:12px"></i>Capture follow-up</div>
     </div>`;
   }
 
   mount.innerHTML=`<div class="mtg-wrap"><div class="mtg-list">${listHTML}</div><div class="mtg-body">${bodyHTML}</div></div>`;
   mount.querySelectorAll('[data-mtg]').forEach(n=>n.addEventListener('click',()=>onSelectMeeting(n.dataset.mtg)));
+  mount.querySelector('#add-agenda-btn')?.addEventListener('click', ()=>onAddAgenda?.());
+  mount.querySelector('#add-followup-btn')?.addEventListener('click', ()=>onAddFollowup?.());
   mount.querySelectorAll('.item[data-task]').forEach(n=>n.addEventListener('click',()=>onSelectTask(n.dataset.task)));
 }

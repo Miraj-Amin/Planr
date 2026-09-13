@@ -105,6 +105,9 @@ export function renderBoard({mount,tasks,people,deliverables,sprints,selId,lane,
     mount.innerHTML=html+`</div>`;
   }
 
+  mount.querySelectorAll('.coladd').forEach(b=>{
+    b.addEventListener('click',()=>onAddTask&&onAddTask(b.closest('[data-col]')?.dataset.col||'todo'));
+  });
   mount.querySelectorAll('.card').forEach(c=>{
     c.addEventListener('dragstart',e=>{dragId=c.dataset.task;c.classList.add('drag');e.dataTransfer.effectAllowed='move';});
     c.addEventListener('dragend',()=>{c.classList.remove('drag');dragId=null;mount.querySelectorAll('.colbody').forEach(b=>b.classList.remove('over'));});
