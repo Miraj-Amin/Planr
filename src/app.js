@@ -10,6 +10,7 @@ import { newProjectForm, newTaskForm, newPhaseForm, newDeliverableForm,
          newMeetingForm, newMeetingItemForm, quickTaskForm } from './views/forms.js';
 
 const taskSvc = new TaskService(db);
+let currentUserId = null; // set from session in boot()
 
 const VIEWS = [
   { id:'plan',     icon:'ti-subtask',       label:'Plan' },
@@ -180,7 +181,7 @@ function render(){
 
 // ── create project ─────────────────────────────────────────────────────────────
 function createProject(){
-  newProjectForm(db,proj=>{
+  newProjectForm(db,currentUserId,proj=>{
     A.project=proj.id; A.view='plan'; render();
   });
 }
@@ -344,8 +345,10 @@ function wireNewTaskBtn(){
 // ── boot ──────────────────────────────────────────────────────────────────────
 async function boot(){
   const {data:{session}}=await supabase.auth.getSession();
+  if(session) currentUserId = session.user.id;
   if(!session){
-    showAuth(supabase,async()=>{
+    showAuth(supabase,async(user)=>{
+      currentUserId = user?.id || null;
       document.body.innerHTML=SHELL;
       wireNewTaskBtn();
       showLoading('Loading workspace…');
