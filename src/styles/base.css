@@ -152,3 +152,16 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .btn.ghost{background:transparent;color:var(--ink3);border:.5px solid var(--bd-strong);height:24px;padding:0 8px;font-size:11px}
 .btn.ghost:hover{color:var(--ink2);background:transparent}
 .btn.ghost.on{color:var(--acc);border-color:var(--acc);background:var(--acc-l)}
+
+/* ── grid view ── */
+.g-cell{cursor:default;transition:background 60ms}
+.g-cell:hover{background:rgba(83,74,183,.03)}
+.g-cell.g-editing{background:rgba(83,74,183,.06);outline:1.5px solid #534AB7;outline-offset:-1px;z-index:5}
+.g-row:hover .row-drag-handle{opacity:1!important}
+.g-col-hd{position:relative}
+.g-col-hd:hover{background:#E8E9ED!important}
+.g-col-hd.drag-over{background:rgba(83,74,183,.1)!important;outline:2px dashed #534AB7;outline-offset:-2px}
+.col-resize:hover,.col-resize:active{background:rgba(83,74,183,.3)}
+.g-group-hd td{background:rgba(0,0,0,.025)}
+.g-add-row:hover td{background:rgba(83,74,183,.04)}
+.ctx-item:hover{background:rgba(83,74,183,.06)!important}

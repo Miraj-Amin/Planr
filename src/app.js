@@ -1,6 +1,7 @@
 import { db, supabase }    from './services/db.js';
 import { TaskService }      from './services/taskService.js';
 import { renderPlan }       from './views/planView.js';
+import { renderGrid }       from './views/gridView.js';
 import { renderBoard }      from './views/boardView.js';
 import { renderFocus }      from './views/focusView.js';
 import { renderMeetings }   from './views/meetingsView.js';
@@ -106,25 +107,27 @@ function render(){
   const mount=document.getElementById('view');
 
   if(A.view==='plan'){
-    const tasks=projTasks(), deps=projDeps();
-    const {resolved,critical}=taskSvc.reschedule(A.project,projStart());
-    mount.innerHTML=`<div id="planMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>
-      <div class="legend">
-        <b>Dependencies</b>
-        <span class="mono" style="color:#534AB7">FS</span><span>finish→start</span>
-        <span class="mono" style="color:#534AB7">SS</span><span>start→start</span>
-        <span class="mono" style="color:#534AB7">FF</span><span>finish→finish</span>
-        <span class="mono" style="color:#534AB7">SF</span><span>start→finish</span>
-        <span style="margin-left:auto"></span>
-        <span class="lg-item"><span class="pv-dep crit" style="font-size:8px">FS</span> critical path</span>
-      </div>`;
-    renderPlan({mount:document.getElementById('planMount'),tasks,deps,resolved,critical,
-      people:people(),selectedId:A.sel,
-      onSelect:id=>{A.sel=A.sel===id?null:id;render();}});
+    mount.innerHTML=`<div id="gridMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
+    function rerender(afterFn){
+      // reload from db cache and re-render grid
+      const t2=projTasks(),d2=db.all('deliverables').filter(d=>d.project_id===A.project),
+            s2=db.all('sprints').filter(s=>s.project_id===A.project);
+      renderGrid({mount:document.getElementById('gridMount'),tasks:t2,people:people(),
+        deliverables:d2,sprints:s2,db,projectId:A.project,
+        onSelect:id=>{A.sel=A.sel===id?null:id;renderPanel();},
+        onRerender:fn=>{ rerender(fn); }});
+      if(afterFn) requestAnimationFrame(afterFn);
+    }
+    renderGrid({mount:document.getElementById('gridMount'),tasks:projTasks(),people:people(),
+      deliverables:db.all('deliverables').filter(d=>d.project_id===A.project),
+      sprints:db.all('sprints').filter(s=>s.project_id===A.project),
+      db, projectId:A.project,
+      onSelect:id=>{A.sel=A.sel===id?null:id;renderPanel();},
+      onRerender:(afterFn)=>{ rerender(afterFn); }});
     document.getElementById('addPhaseBtn')?.addEventListener('click',()=>
-      newPhaseForm(db,A.project,()=>render()));
+      newPhaseForm(db,A.project,()=>rerender()));
     document.getElementById('addDlBtn')?.addEventListener('click',()=>
-      newDeliverableForm(db,A.project,()=>render()));
+      newDeliverableForm(db,A.project,()=>rerender()));
 
   } else if(A.view==='board'){
     mount.innerHTML=`<div id="boardMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
