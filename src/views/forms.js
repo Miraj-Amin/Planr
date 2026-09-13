@@ -22,35 +22,26 @@ export function newProjectForm(db, supabase, userId, onDone) {
     ],
     submitLabel: 'Create project',
     onSubmit: async data => {
-      // 1. Insert project — WAIT for Supabase to confirm it exists
-      const { data: proj, error: projErr } = await supabase
-        .from('projects')
-        .insert({ name: data.name, client_org: data.client_org || null, status: 'active' })
-        .select()
-        .single();
+      // Single atomic call — creates project AND adds owner via SECURITY DEFINER
+      // function, bypassing the RLS chicken-and-egg problem.
+      const { data: proj, error } = await supabase.rpc('create_project_for_user', {
+        p_name:       data.name,
+        p_client_org: data.client_org || null,
+      });
 
-      if (projErr) throw new Error(projErr.message);
+      if (error) throw new Error(error.message);
 
-      // 2. Add to local cache immediately
+      // Add to local cache
       (db._cache = db._cache || {});
       (db._cache.projects = db._cache.projects || []).push(proj);
 
-      // 3. Only AFTER project confirmed on server, add user as owner
-      if (userId) {
-        const { error: pmErr } = await supabase
-          .from('project_members')
-          .insert({ project_id: proj.id, user_id: userId, role: 'owner' });
-        if (pmErr) console.warn('project_members insert failed:', pmErr.message);
-      }
-
-      // 4. Seed Sprint 1 (fire-and-forget is fine here — no FK dependency)
-      const sprint = {
+      // Seed Sprint 1 — no FK constraint, safe as fire-and-forget
+      supabase.from('sprints').insert({
         project_id: proj.id, is_active: true,
         name: 'Sprint 1 · ' + new Date().toLocaleDateString('en-GB',{day:'numeric',month:'short'}),
         start_date: new Date().toISOString().slice(0,10),
         end_date:   new Date(Date.now()+12096e5).toISOString().slice(0,10),
-      };
-      await supabase.from('sprints').insert(sprint);
+      }).then(({ error: se }) => { if (se) console.warn('Sprint seed failed:', se.message); });
 
       onDone(proj);
     },
