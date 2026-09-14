@@ -15,6 +15,8 @@ export class LocalAdapter {
                   (this.db[t]=this.db[t]||[]).push(rec); this._persist(); return rec; }
   insertAwait(t, rec) { return Promise.resolve(this.insert(t, rec)); }
   updateAwait(t, id, patch) { return Promise.resolve(this.update(t, id, patch)); }
+  batchInsert(t, recs) { (recs || []).forEach(r => this.insert(t, r)); return Promise.resolve(recs || []); }
+  removeAwait(t, id) { this.remove(t, id); return Promise.resolve(); }
   update(t, id, patch){ const r=this.get(t,id); if(r){Object.assign(r,patch);this._persist();} return r; }
   remove(t, id) { this.db[t]=(this.db[t]||[]).filter(r=>r.id!==id); this._persist(); }
 }
@@ -160,6 +162,31 @@ export class SupabaseAdapter {
     const { error } = await this.sb.from(t).update(patch).eq('id', id);
     if (error) throw new Error(`Update [${t}] failed: ${error.message}`);
     return r;
+  }
+
+  // Batch insert — a single round-trip that either lands every row or none.
+  // Postgres treats a single INSERT as one transaction, so if any row violates a
+  // constraint the whole batch is rolled back on the server side. That gives us
+  // real atomicity for imports (versus firing many Promise.all inserts, where a
+  // late failure still leaves the earlier successful rows behind).
+  async batchInsert(t, recs) {
+    if (!recs || recs.length === 0) return [];
+    recs.forEach(r => { r.id = r.id || crypto.randomUUID(); });
+    (this._cache[t] = this._cache[t] || []).push(...recs);
+    const { error } = await this.sb.from(t).insert(recs);
+    if (error) {
+      const ids = new Set(recs.map(r => r.id));
+      this._cache[t] = this._cache[t].filter(r => !ids.has(r.id));
+      throw new Error(`Batch insert [${t}] (${recs.length} rows) failed: ${error.message}`);
+    }
+    return recs;
+  }
+
+  // Awaitable delete used for rollback during import failure.
+  async removeAwait(t, id) {
+    this._cache[t] = (this._cache[t] || []).filter(r => r.id !== id);
+    const { error } = await this.sb.from(t).delete().eq('id', id);
+    if (error) throw new Error(`Delete [${t}] failed: ${error.message}`);
   }
 
   update(t, id, patch) {

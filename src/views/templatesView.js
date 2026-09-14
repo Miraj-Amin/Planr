@@ -216,89 +216,103 @@ function openImportPreview(parsed, db, onDone) {
     const name = modal.querySelector('#tplImportName').value.trim() || parsed.name;
     const desc = modal.querySelector('#tplImportDesc').value.trim();
     btn.disabled = true;
-    btn.textContent = `Saving…`;
+    btn.textContent = 'Saving…';
+
+    // 1. Create the template row and wait for it to land — the batch inserts
+    //    below rely on the template row existing on the server before they
+    //    reference it as a foreign key.
+    let tpl;
     try {
-      // 1. Create template row and wait for it to land — the FK cascade below
-      //    requires the template row to exist in the DB, not just the cache.
-      const tpl = await db.insertAwait('templates', {
+      tpl = await db.insertAwait('templates', {
         name, description: desc || null,
         source: 'excel_import',
         created_at: new Date().toISOString(),
       });
+    } catch (err) {
+      alert(`Save failed: ${err.message}`);
+      btn.disabled = false;
+      btn.textContent = 'Save template';
+      return;
+    }
 
-      // 2. Build a hierarchy in three rounds:
-      //    - Round A: one phase row per unique phase
-      //    - Round B: one task row per Excel row, parented to its phase
-      //    - Round C: one deliverable row per Excel row that has a primary_deliverable,
-      //              parented to its task
-      //    Within each round the inserts run in parallel; between rounds we wait so
-      //    downstream rows can reference the ids just written.
+    // 2. Build the hierarchy in three atomic rounds. Each round is ONE batch
+    //    insert — Postgres treats it as a single transaction, so if any row in
+    //    a batch fails the whole batch is rolled back. If any batch fails, we
+    //    delete the parent template row, which cascades to any rows that did
+    //    land in earlier batches. Import is either fully successful or fully
+    //    reverted — no partial state.
+    try {
+      // Unique phase names, in first-seen order (mirrors the Excel).
       const phaseNames = [];
       const seen = new Set();
       for (const t of parsed.tasks) {
         const p = t.phase || '(No phase)';
         if (!seen.has(p)) { seen.add(p); phaseNames.push(p); }
       }
-      btn.textContent = `Saving ${phaseNames.length} phases…`;
 
-      // Pre-generate all IDs so children can reference parents without waiting on each other.
-      const phaseIds = new Map(phaseNames.map(name => [name, crypto.randomUUID()]));
+      // Pre-generate IDs so tasks in round B can reference the phase they belong
+      // to, and deliverables in round C can reference their parent task.
+      const phaseIds = new Map(phaseNames.map(n => [n, crypto.randomUUID()]));
       const taskIds  = parsed.tasks.map(() => crypto.randomUUID());
 
-      // Extract phase-level WBS from the first task in each phase (the "1"
-      // prefix from "1.1"). Falls back to the phase's index if no task WBS.
+      // Phase-level WBS from the first task's leading segment (e.g. "1.1" → "1").
       const phaseWbs = new Map();
-      phaseNames.forEach((name, i) => {
-        const firstTaskWithWbs = parsed.tasks.find(t => (t.phase || '(No phase)') === name && t.wbs);
-        const wbs = firstTaskWithWbs ? String(firstTaskWithWbs.wbs).split('.')[0] : String(i + 1);
-        phaseWbs.set(name, wbs);
+      phaseNames.forEach((n, i) => {
+        const first = parsed.tasks.find(t => (t.phase || '(No phase)') === n && t.wbs);
+        phaseWbs.set(n, first ? String(first.wbs).split('.')[0] : String(i + 1));
       });
 
-      // Round A — phases
-      await Promise.all(phaseNames.map((name, i) => db.insertAwait('template_tasks', {
-        id:          phaseIds.get(name),
+      // Round A — phase rows
+      btn.textContent = `Saving ${phaseNames.length} phases…`;
+      const phaseRows = phaseNames.map((n, i) => ({
+        id:          phaseIds.get(n),
         template_id: tpl.id,
         parent_id:   null,
         type:        'phase',
-        name,
-        phase:       name,
-        wbs:         phaseWbs.get(name),
+        name:        n,
+        phase:       n,
+        wbs:         phaseWbs.get(n),
         sort_order:  (i + 1) * 10000,
-      })));
-
-      // Round B — tasks / milestones
-      btn.textContent = `Saving ${parsed.tasks.length} tasks…`;
-      await Promise.all(parsed.tasks.map((t, i) => {
-        const phaseName = t.phase || '(No phase)';
-        return db.insertAwait('template_tasks', {
-          ...t,
-          id:          taskIds[i],
-          template_id: tpl.id,
-          parent_id:   phaseIds.get(phaseName),
-          type:        t.is_milestone ? 'milestone' : 'task',
-          sort_order:  (i + 1) * 100,
-        });
       }));
+      await db.batchInsert('template_tasks', phaseRows);
 
-      // Round C — deliverables
-      const delivs = parsed.tasks
+      // Round B — task / milestone rows
+      btn.textContent = `Saving ${parsed.tasks.length} tasks…`;
+      const taskRows = parsed.tasks.map((t, i) => ({
+        ...t,
+        id:          taskIds[i],
+        template_id: tpl.id,
+        parent_id:   phaseIds.get(t.phase || '(No phase)'),
+        type:        t.is_milestone ? 'milestone' : 'task',
+        sort_order:  (i + 1) * 100,
+      }));
+      await db.batchInsert('template_tasks', taskRows);
+
+      // Round C — deliverable rows (one per task that has a primary deliverable)
+      const delivRows = parsed.tasks
         .map((t, i) => ({ t, taskId: taskIds[i] }))
-        .filter(({ t }) => t.primary_deliverable && String(t.primary_deliverable).trim());
-      if (delivs.length) {
-        btn.textContent = `Saving ${delivs.length} deliverables…`;
-        await Promise.all(delivs.map(({ t, taskId }) => db.insertAwait('template_tasks', {
+        .filter(({ t }) => t.primary_deliverable && String(t.primary_deliverable).trim())
+        .map(({ t, taskId }) => ({
           template_id: tpl.id,
           parent_id:   taskId,
           type:        'deliverable',
           name:        t.primary_deliverable,
           sort_order:  100,
-        })));
+        }));
+      if (delivRows.length) {
+        btn.textContent = `Saving ${delivRows.length} deliverables…`;
+        await db.batchInsert('template_tasks', delivRows);
       }
 
       close();
       onDone?.();
     } catch (err) {
-      alert(`Save failed: ${err.message}`);
+      // Roll back the template row. ON DELETE CASCADE takes care of any
+      // template_tasks that had landed in earlier batches.
+      try { await db.removeAwait('templates', tpl.id); }
+      catch (rollbackErr) { console.error('Rollback failed:', rollbackErr); }
+
+      alert(`Import failed and was rolled back.\n\n${err.message}\n\nNothing was saved. Try again.`);
       btn.disabled = false;
       btn.textContent = 'Save template';
     }
