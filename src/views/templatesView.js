@@ -60,7 +60,7 @@ export function renderTemplates({ mount, templates, template_tasks, projects, pe
                 const phases = phasesFor(t.id);
                 return `<div class="tpl-card" data-tpl="${t.id}">
                   <div class="tpl-card-head">
-                    <div class="tpl-card-name">${t.name || 'Untitled'}</div>
+                    <div class="tpl-card-name tpl-open-btn" data-tpl="${t.id}" title="Open template">${escapeHtml(t.name || 'Untitled')}</div>
                     <div class="tpl-card-menu-wrap">
                       <button class="tpl-card-menu-btn" data-tpl="${t.id}" title="More">
                         <i class="ti ti-dots" style="font-size:14px"></i>
@@ -68,19 +68,22 @@ export function renderTemplates({ mount, templates, template_tasks, projects, pe
                     </div>
                   </div>
                   ${t.description ? `<div class="tpl-card-desc">${escapeHtml(t.description)}</div>` : ''}
-                  <div class="tpl-card-stats">
+                  <div class="tpl-card-stats tpl-open-btn" data-tpl="${t.id}">
                     <span><i class="ti ti-list-check" style="font-size:11px"></i>${countFor(t.id)} tasks</span>
                     <span><i class="ti ti-layers-intersect" style="font-size:11px"></i>${phases.length} phases</span>
                   </div>
-                  ${phases.length ? `<div class="tpl-phase-strip">
+                  ${phases.length ? `<div class="tpl-phase-strip tpl-open-btn" data-tpl="${t.id}">
                     ${phases.slice(0, 6).map(p =>
                       `<span class="tpl-phase-chip" style="background:${(PHASE_COLORS[p] || '#9CA3AF')}1a;color:${PHASE_COLORS[p] || '#9CA3AF'}">${escapeHtml(p)}</span>`
                     ).join('')}
                     ${phases.length > 6 ? `<span class="tpl-phase-chip">+${phases.length - 6}</span>` : ''}
                   </div>` : ''}
-                  <div class="tpl-card-actions">
-                    <button class="btn tpl-use-btn" data-tpl="${t.id}" style="height:30px;padding:0 12px;font-size:12px;width:100%">
-                      <i class="ti ti-plus" style="font-size:11px"></i>New project from this
+                  <div class="tpl-card-actions" style="display:flex;gap:6px">
+                    <button class="tpl-btn-ghost tpl-edit-btn" data-tpl="${t.id}" style="flex:1;height:30px;font-size:12px">
+                      <i class="ti ti-pencil" style="font-size:11px"></i>Open plan
+                    </button>
+                    <button class="btn tpl-use-btn" data-tpl="${t.id}" style="height:30px;padding:0 12px;font-size:12px;flex:1">
+                      <i class="ti ti-plus" style="font-size:11px"></i>New project
                     </button>
                   </div>
                 </div>`;
@@ -120,9 +123,20 @@ export function renderTemplates({ mount, templates, template_tasks, projects, pe
     });
   });
 
+  // ── Open template editor ──────────────────────────────────────────
+  mount.querySelectorAll('.tpl-edit-btn, .tpl-open-btn').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      const tid = el.dataset.tpl;
+      if (!tid) return;
+      window.dispatchEvent(new CustomEvent('planr:openTemplate', { detail: tid }));
+    });
+  });
+
   // ── Use template ──────────────────────────────────────────────────
   mount.querySelectorAll('.tpl-use-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
       const tid = btn.dataset.tpl;
       const t = templates.find(x => x.id === tid);
       if (!t) return;
@@ -195,23 +209,36 @@ function openImportPreview(parsed, db, onDone) {
   modal.querySelector('#tplImportCancel').addEventListener('click', close);
   modal.addEventListener('click', e => { if (e.target === modal) close(); });
 
-  modal.querySelector('#tplImportSave').addEventListener('click', () => {
+  modal.querySelector('#tplImportSave').addEventListener('click', async () => {
+    const btn = modal.querySelector('#tplImportSave');
     const name = modal.querySelector('#tplImportName').value.trim() || parsed.name;
     const desc = modal.querySelector('#tplImportDesc').value.trim();
-    const tpl = db.insert('templates', {
-      name, description: desc || null,
-      source: 'excel_import',
-      created_at: new Date().toISOString(),
-    });
-    parsed.tasks.forEach((t, i) => {
-      db.insert('template_tasks', {
-        ...t,
-        template_id: tpl.id,
-        sort_order: (i + 1) * 100,
+    btn.disabled = true;
+    btn.textContent = `Saving ${parsed.tasks.length} tasks…`;
+    try {
+      // Await the template row landing in the DB before firing its children —
+      // otherwise the child inserts hit the FK constraint before the parent
+      // has committed.
+      const tpl = await db.insertAwait('templates', {
+        name, description: desc || null,
+        source: 'excel_import',
+        created_at: new Date().toISOString(),
       });
-    });
-    close();
-    onDone?.();
+      // Now the parent row exists in the DB — children can run in parallel.
+      await Promise.all(parsed.tasks.map((t, i) =>
+        db.insertAwait('template_tasks', {
+          ...t,
+          template_id: tpl.id,
+          sort_order: (i + 1) * 100,
+        })
+      ));
+      close();
+      onDone?.();
+    } catch (err) {
+      alert(`Save failed: ${err.message}`);
+      btn.disabled = false;
+      btn.textContent = 'Save template';
+    }
   });
 }
 

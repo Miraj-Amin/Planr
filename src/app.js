@@ -7,6 +7,7 @@ import { renderFocus }       from './views/focusView.js';
 import { renderMeetings }    from './views/meetingsView.js';
 import { renderContacts }    from './views/contactsView.js';
 import { renderTemplates }   from './views/templatesView.js';
+import { renderTemplateEdit } from './views/templateEditView.js';
 import { renderRisks }       from './views/risksView.js';
 import { renderGantt }       from './views/ganttView.js';
 import { renderDashboard }   from './views/dashboardView.js';
@@ -42,6 +43,7 @@ let A = {
   view:'plan', project:null, sel:null, meeting:null,
   horizon:7, lane:'none', hideAgenda:false,
   homeView:'projects',
+  templateId:null,   // when set + homeView==='templates', shows the editor
 };
 
 // ── loading ────────────────────────────────────────────────────────────────
@@ -59,7 +61,7 @@ function showLoading(msg) {
 
 // ── go home (projects overview) ────────────────────────────────────────────
 async function goHome() {
-  A.project = null; A.sel = null; A.meeting = null;
+  A.project = null; A.sel = null; A.meeting = null; A.templateId = null;
   showLoading('Loading projects…');
   await db.loadOverview();
   renderApp();
@@ -110,8 +112,8 @@ async function createProjectFromTemplate({ name, client_org, startDate, tasks, r
 
   let sortOrder = 100;
   for (const [phaseName, phaseTasks] of byPhase.entries()) {
-    // Phase parent
-    const parent = db.insert('tasks', {
+    // Phase parent — await so children can safely reference parent_id.
+    const parent = await db.insertAwait('tasks', {
       project_id: proj.id,
       name: phaseName,
       type: 'phase',
@@ -121,10 +123,11 @@ async function createProjectFromTemplate({ name, client_org, startDate, tasks, r
     });
     sortOrder += 100;
 
-    for (const tt of phaseTasks) {
+    // Children can go in parallel now that the parent has committed.
+    const childInserts = phaseTasks.map(tt => {
       const start = addWorkdays(startDate, tt.start_offset_workdays || 0);
       const end   = addWorkdays(start,     Math.max(0, (tt.duration_workdays || 1) - 1));
-      db.insert('tasks', {
+      const rec = {
         project_id:            proj.id,
         parent_id:             parent.id,
         name:                  tt.name,
@@ -144,11 +147,12 @@ async function createProjectFromTemplate({ name, client_org, startDate, tasks, r
         end_date:              isoDate(end),
         key_dependency:        tt.key_dependency || null,
         acceptance_criteria:   tt.acceptance_criteria || null,
-        sort_order:            sortOrder,
+        sort_order:            (sortOrder += 10),
         created_at:            new Date().toISOString(),
-      });
-      sortOrder += 10;
-    }
+      };
+      return db.insertAwait('tasks', rec);
+    });
+    await Promise.all(childInserts);
   }
 
   await openProject(proj.id);
@@ -306,15 +310,27 @@ function renderApp() {
     }
 
     if (A.homeView === 'templates') {
-      renderTemplates({
-        mount,
-        templates: db.all('templates'),
-        template_tasks: db.all('template_tasks'),
-        projects: db.all('projects'),
-        people: db.all('people'),
-        db,
-        onCreateProject: opts => createProjectFromTemplate(opts),
-      });
+      if (A.templateId) {
+        renderTemplateEdit({
+          mount,
+          templateId: A.templateId,
+          templates: db.all('templates'),
+          template_tasks: db.all('template_tasks'),
+          db,
+          onBack: () => { A.templateId = null; renderApp(); },
+          onRerender: () => renderApp(),
+        });
+      } else {
+        renderTemplates({
+          mount,
+          templates: db.all('templates'),
+          template_tasks: db.all('template_tasks'),
+          projects: db.all('projects'),
+          people: db.all('people'),
+          db,
+          onCreateProject: opts => createProjectFromTemplate(opts),
+        });
+      }
       const mb = document.getElementById('mainBtn');
       if (mb) mb.style.display = 'none';
       return;
@@ -748,7 +764,7 @@ document.addEventListener('click', e => {
   const v = e.target.closest('[data-view]');
   if (v) { A.view=v.dataset.view; A.sel=null; renderApp(); return; }
   const hv = e.target.closest('[data-home-view]');
-  if (hv) { A.homeView=hv.dataset.homeView; A.sel=null; renderApp(); return; }
+  if (hv) { A.homeView=hv.dataset.homeView; A.sel=null; A.templateId=null; renderApp(); return; }
   const hz = e.target.closest('[data-hz]');
   if (hz) { A.horizon=+hz.dataset.hz; renderApp(); return; }
 });
@@ -759,8 +775,10 @@ document.addEventListener('keydown', e => { if(e.key==='Escape'){ A.sel=null; re
 
 // Cross-view events fired by children:
 // - planr:openProject   → jump into a project (from Portfolio dashboard)
+// - planr:openTemplate  → open a template in the editor (from Templates list)
 // - planr:rerender      → re-render current view (from Templates after import/delete)
-window.addEventListener('planr:openProject', e => { openProject(e.detail); });
+window.addEventListener('planr:openProject',  e => { openProject(e.detail); });
+window.addEventListener('planr:openTemplate', e => { A.homeView = 'templates'; A.templateId = e.detail; renderApp(); });
 window.addEventListener('planr:rerender',    () => { renderApp(); });
 
 // ── shell HTML ─────────────────────────────────────────────────────────────

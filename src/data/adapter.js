@@ -13,6 +13,7 @@ export class LocalAdapter {
   where(t, fn)  { return (this.db[t] || []).filter(fn); }
   insert(t, rec){ rec.id = rec.id || (t.slice(0,2)+'_'+Math.random().toString(36).slice(2,9));
                   (this.db[t]=this.db[t]||[]).push(rec); this._persist(); return rec; }
+  insertAwait(t, rec) { return Promise.resolve(this.insert(t, rec)); }
   update(t, id, patch){ const r=this.get(t,id); if(r){Object.assign(r,patch);this._persist();} return r; }
   remove(t, id) { this.db[t]=(this.db[t]||[]).filter(r=>r.id!==id); this._persist(); }
 }
@@ -134,6 +135,19 @@ export class SupabaseAdapter {
         this._cache[t] = (this._cache[t] || []).filter(r => r.id !== rec.id);
       }
     });
+    return rec;
+  }
+
+  // Same as insert but returns a Promise that resolves once the write has landed.
+  // Use this whenever a subsequent insert depends on this row's id (FK relationship).
+  async insertAwait(t, rec) {
+    rec.id = rec.id || crypto.randomUUID();
+    (this._cache[t] = this._cache[t] || []).push(rec);
+    const { error } = await this.sb.from(t).insert(rec);
+    if (error) {
+      this._cache[t] = (this._cache[t] || []).filter(r => r.id !== rec.id);
+      throw new Error(`Insert [${t}] failed: ${error.message}`);
+    }
     return rec;
   }
 
