@@ -19,7 +19,7 @@ const ALL_COLS = [
 ];
 
 const STATUSES = [['todo','To do'],['in-progress','In progress'],['blocked','Blocked'],['review','Review'],['done','Done']];
-const TYPES    = [['task','Task'],['deliverable','Deliverable'],['milestone','Milestone'],['phase','Phase'],['agenda','Agenda'],['followup','Follow-up']];
+const TYPES    = [['task','Task'],['deliverable','Deliverable'],['milestone','Milestone'],['phase','Phase'],['meeting','Meeting'],['agenda','Agenda'],['followup','Follow-up']];
 const EFFORT   = [[0,'—'],[15,'15m'],[30,'30m'],[60,'1h'],[120,'2h'],[240,'4h'],[480,'1d'],[960,'2d'],[2400,'1w']];
 
 let _sortSeq = 1_000_000;
@@ -29,6 +29,15 @@ const nextSort = () => ++_sortSeq;
 function cellHTML(colId, task, ctx, hasChildren, isCollapsed) {
   const { people, sprints } = ctx;
   const baseStyle = 'border:0;outline:0;background:transparent;font-family:inherit;font-size:13px;color:#1A1A22;width:100%;height:100%;padding:0;cursor:pointer';
+
+  // Fields that are auto-rolled-up on parents and must be locked
+  const LOCKED_ON_PARENT = ['status','start_date','end_date','effort_min','progress'];
+  const isLocked = hasChildren && LOCKED_ON_PARENT.includes(colId);
+  const lockStyle = isLocked
+    ? 'cursor:not-allowed;color:#6B7280;pointer-events:none;opacity:0.85'
+    : '';
+  const lockAttr = isLocked ? 'disabled' : '';
+  const lockTitle = isLocked ? 'title="Rolled up from children"' : '';
 
   switch (colId) {
     case 'name': {
@@ -51,24 +60,30 @@ function cellHTML(colId, task, ctx, hasChildren, isCollapsed) {
     }
     case 'status': {
       const opts = STATUSES.map(([v,l]) => `<option value="${v}" ${v===task.status?'selected':''}>${l}</option>`).join('');
-      return `<select class="g-in" data-id="${task.id}" data-col="status" style="${baseStyle}">${opts}</select>`;
+      return `<select class="g-in" data-id="${task.id}" data-col="status" ${lockAttr} ${lockTitle} style="${baseStyle};${lockStyle}">${opts}</select>`;
     }
     case 'owner_id': {
       const blank = `<option value="" ${!task.owner_id?'selected':''}>Unassigned</option>`;
       const opts = people.map(p => `<option value="${p.id}" ${p.id===task.owner_id?'selected':''}>${p.name}${p.is_client?' (client)':''}</option>`).join('');
-      return `<select class="g-in" data-id="${task.id}" data-col="owner_id" style="${baseStyle}">${blank}${opts}</select>`;
+      const addNew = `<option value="__add_person__" style="font-style:italic">+ Add person…</option>`;
+      return `<select class="g-in" data-id="${task.id}" data-col="owner_id" style="${baseStyle}">${blank}${opts}${addNew}</select>`;
     }
     case 'type': {
       const opts = TYPES.map(([v,l]) => `<option value="${v}" ${v===task.type?'selected':''}>${l}</option>`).join('');
       return `<select class="g-in" data-id="${task.id}" data-col="type" style="${baseStyle}">${opts}</select>`;
     }
     case 'start_date':
-      return `<input type="date" class="g-in" data-id="${task.id}" data-col="start_date"
-        value="${task.start_date||''}" style="${baseStyle};font-family:monospace;font-size:12px">`;
+      return `<input type="date" class="g-in" data-id="${task.id}" data-col="start_date" ${lockAttr} ${lockTitle}
+        value="${task.start_date||''}" style="${baseStyle};font-family:monospace;font-size:12px;${lockStyle}">`;
     case 'end_date':
-      return `<input type="date" class="g-in" data-id="${task.id}" data-col="end_date"
-        value="${task.end_date||''}" style="${baseStyle};font-family:monospace;font-size:12px">`;
+      return `<input type="date" class="g-in" data-id="${task.id}" data-col="end_date" ${lockAttr} ${lockTitle}
+        value="${task.end_date||''}" style="${baseStyle};font-family:monospace;font-size:12px;${lockStyle}">`;
     case 'effort_min': {
+      if (isLocked) {
+        // Show computed value as text instead of an editable select
+        const label = EFFORT.find(([v]) => v === task.effort_min)?.[1] || (task.effort_min ? task.effort_min + 'm' : '—');
+        return `<span title="Rolled up from children" style="font-size:12px;font-family:monospace;color:#6B7280;padding:0 4px">${label}</span>`;
+      }
       const opts = EFFORT.map(([v,l]) => `<option value="${v}" ${v===task.effort_min?'selected':''}>${l}</option>`).join('');
       return `<select class="g-in" data-id="${task.id}" data-col="effort_min" style="${baseStyle}">${opts}</select>`;
     }
@@ -78,8 +93,8 @@ function cellHTML(colId, task, ctx, hasChildren, isCollapsed) {
       return `<select class="g-in" data-id="${task.id}" data-col="sprint_id" style="${baseStyle}">${blank}${opts}</select>`;
     }
     case 'progress':
-      return `<input type="number" class="g-in" data-id="${task.id}" data-col="progress"
-        min="0" max="100" value="${task.progress||0}" style="${baseStyle};text-align:right;font-family:monospace;font-size:12px">`;
+      return `<input type="number" class="g-in" data-id="${task.id}" data-col="progress" ${lockAttr} ${lockTitle}
+        min="0" max="100" value="${task.progress||0}" style="${baseStyle};text-align:right;font-family:monospace;font-size:12px;${lockStyle}">`;
   }
   return '';
 }
@@ -136,23 +151,50 @@ function addRowHTML(groupKey, colspan) {
   </tr>`;
 }
 
-// ─── date rollup ─────────────────────────────────────────────────────────────
-function rollupParentDates(parentId, db, allTasks) {
+// ─── parent rollup ───────────────────────────────────────────────────────────
+// Aggregates all rollup fields (status, dates, effort, progress) from children.
+// Status rule:
+//   - if any child is 'blocked' → parent is 'blocked'
+//   - else if any child is 'in-progress' → parent is 'in-progress'
+//   - else if any child is 'review' → parent is 'review'
+//   - else if all children are 'done' → parent is 'done'
+//   - else → 'todo'
+function computeParentStatus(children) {
+  if (!children.length) return null;
+  const statuses = children.map(c => c.status);
+  if (statuses.includes('blocked'))     return 'blocked';
+  if (statuses.includes('in-progress')) return 'in-progress';
+  if (statuses.includes('review'))      return 'review';
+  if (statuses.every(s => s === 'done')) return 'done';
+  return 'todo';
+}
+
+function rollupParent(parentId, db, allTasks) {
   if (!parentId) return;
   const parent = db.get('tasks', parentId);
   if (!parent) return;
   const children = allTasks.filter(t => t.parent_id === parentId);
   if (!children.length) return;
-  const starts = children.map(c=>c.start_date).filter(Boolean).sort();
-  const ends   = children.map(c=>c.end_date).filter(Boolean).sort();
-  if (starts.length || ends.length) {
-    db.update('tasks', parentId, {
-      start_date: starts[0] || parent.start_date,
-      end_date:   ends[ends.length-1] || parent.end_date,
-    });
-  }
-  rollupParentDates(parent.parent_id, db, allTasks);
+
+  const starts   = children.map(c => c.start_date).filter(Boolean).sort();
+  const ends     = children.map(c => c.end_date).filter(Boolean).sort();
+  const efforts  = children.map(c => c.effort_min || 0);
+  const progs    = children.map(c => c.progress || 0);
+  const newStatus = computeParentStatus(children);
+
+  const patch = {};
+  if (starts.length)          patch.start_date  = starts[0];
+  if (ends.length)            patch.end_date    = ends[ends.length - 1];
+  patch.effort_min = efforts.reduce((a,b) => a+b, 0);
+  patch.progress   = Math.round(progs.reduce((a,b) => a+b, 0) / children.length);
+  if (newStatus)              patch.status      = newStatus;
+
+  db.update('tasks', parentId, patch);
+  rollupParent(parent.parent_id, db, allTasks);
 }
+
+// Keep old name as alias for compatibility
+const rollupParentDates = rollupParent;
 
 // ─── indent / outdent ────────────────────────────────────────────────────────
 function indentTask(taskId, db, allTasks, onRerender) {
@@ -333,6 +375,18 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
       childrenOf.get(t.parent_id).push(t);
     }
   });
+
+  // One-shot rollup pass: ensure parent values reflect current children.
+  // Roll up from deepest first so nested parents get correct totals.
+  const parentIds = [...childrenOf.keys()];
+  const depthOf = id => {
+    let d = 0;
+    let cur = db.get('tasks', id);
+    while (cur && cur.parent_id) { d++; cur = db.get('tasks', cur.parent_id); }
+    return d;
+  };
+  parentIds.sort((a, b) => depthOf(b) - depthOf(a));  // deepest first
+  parentIds.forEach(pid => rollupParent(pid, db, tasks));
 
   // Build visible hierarchy respecting collapsed state
   function collectRows(taskId, indent) {
@@ -574,15 +628,69 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     else if (el.type === 'date') value = el.value || null;
     else                         value = el.value === '' ? null : el.value;
 
+    // Handle "+ Add person…" from owner dropdown
+    if (colId === 'owner_id' && value === '__add_person__') {
+      const name = prompt('Person name:');
+      if (!name || !name.trim()) {
+        // Reset dropdown and abort
+        el.value = task.owner_id || '';
+        return;
+      }
+      const trimmed = name.trim();
+      const initials = trimmed.split(/\s+/).map(w => w[0]||'').join('').slice(0,2).toUpperCase() || '?';
+      // Pick a colour from a palette based on hash of name
+      const palette = ['#5B7FCC','#5B9E7F','#9B67C2','#C47B3E','#D4716A','#7F77DD','#1D9E75','#BA7517'];
+      const hash = [...trimmed].reduce((a,c) => a + c.charCodeAt(0), 0);
+      const color = palette[hash % palette.length];
+      const newPerson = db.insert('people', {
+        name: trimmed, initials, color, is_client: false, org: null,
+      });
+      // Assign them as owner
+      db.update('tasks', taskId, { owner_id: newPerson.id });
+      onRerender();
+      return;
+    }
+
     const patch = { [colId]: value };
     if (colId === 'progress' && value != null && value >= 100) patch.status = 'done';
     if (colId === 'progress' && value != null && value < 100 && task.status === 'done') patch.status = 'in-progress';
     db.update('tasks', taskId, patch);
 
-    if ((colId === 'start_date' || colId === 'end_date') && task.parent_id) {
-      rollupParentDates(task.parent_id, db, db.all('tasks').filter(t => t.project_id === projectId));
+    // Roll up to parents on any rolled-up field change
+    const ROLLUP_FIELDS = ['status','start_date','end_date','effort_min','progress'];
+    if (ROLLUP_FIELDS.includes(colId) && task.parent_id) {
+      rollupParent(task.parent_id, db, db.all('tasks').filter(t => t.project_id === projectId));
     }
-    if (colId === 'type' || colId === 'start_date' || colId === 'end_date') {
+
+    // Auto-create meeting when task type changes to 'meeting'
+    if (colId === 'type' && value === 'meeting') {
+      const existing = db.all('meetings').find(m => m.linked_task_id === taskId);
+      if (!existing) {
+        db.insert('meetings', {
+          project_id: projectId,
+          title: task.name || 'New meeting',
+          date: task.start_date || new Date().toISOString().slice(0, 10),
+          start_time: '09:00',
+          duration_min: 55,
+          notes: null,
+          linked_task_id: taskId,
+        });
+      }
+    }
+
+    // Keep the linked meeting in sync when a 'meeting' task's name or date changes
+    if (task.type === 'meeting' || (colId === 'type' && value === 'meeting')) {
+      const linked = db.all('meetings').find(m => m.linked_task_id === taskId);
+      if (linked) {
+        const meetingPatch = {};
+        if (colId === 'name')       meetingPatch.title = value || 'Untitled meeting';
+        if (colId === 'start_date') meetingPatch.date  = value || new Date().toISOString().slice(0, 10);
+        if (Object.keys(meetingPatch).length) db.update('meetings', linked.id, meetingPatch);
+      }
+    }
+
+    // Rerender on any change that affects appearance or hierarchy
+    if (ROLLUP_FIELDS.includes(colId) || colId === 'type') {
       onRerender();
     }
   });
@@ -593,7 +701,14 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     if (!el || el.dataset.col !== 'name') return;
     const task = db.get('tasks', el.dataset.id);
     if (!task) return;
-    if ((task.name || '') !== el.value) db.update('tasks', el.dataset.id, { name: el.value });
+    if ((task.name || '') !== el.value) {
+      db.update('tasks', el.dataset.id, { name: el.value });
+      // Sync meeting title if this is a meeting-type task
+      if (task.type === 'meeting') {
+        const linked = db.all('meetings').find(m => m.linked_task_id === task.id);
+        if (linked) db.update('meetings', linked.id, { title: el.value || 'Untitled meeting' });
+      }
+    }
   }, true);
 
   // Enter = new row below, Tab = indent/outdent
