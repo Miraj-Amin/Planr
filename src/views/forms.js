@@ -171,7 +171,7 @@ export function newMeetingForm(db, projectId, onDone) {
 }
 
 // ── MEETING ITEM ──────────────────────────────────────────────────────────────
-export function newMeetingItemForm(db, projectId, meetingId, kind, onDone) {
+export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onDone) {
   const people = db.all('people');
   const isFollowup = kind === 'followup';
   openModal({
@@ -188,15 +188,41 @@ export function newMeetingItemForm(db, projectId, meetingId, kind, onDone) {
       { key:'notes', label:'Notes', type:'textarea', placeholder:'Optional…' },
     ],
     submitLabel: isFollowup ? 'Capture follow-up' : 'Add to agenda',
-    onSubmit: data => {
-      const task = db.insert('tasks', {
-        project_id:projectId, type:kind, name:data.name, notes:data.notes||null,
-        status:'todo', owner_id:data.owner_id||null,
-        end_date:data.end_date||null, start_date:new Date().toISOString().slice(0,10),
-        effort_min:0, priority:'normal', progress:0, flagged:true, sort_order: (Date.now() % 2000000000),
-      });
-      const mi = db.insert('meeting_items', { task_id:task.id, kind, resolved:false, carried_from:null });
-      db.insert('meeting_item_links', { meeting_item_id:mi.id, meeting_id:meetingId });
+    onSubmit: async data => {
+      // Sequential inserts — each FK-dependent record must exist server-side
+      // before the next one references it. Fire-and-forget causes the link
+      // to hit Supabase before the item is saved.
+
+      // 1. Insert task, wait for confirmation
+      const taskRec = {
+        project_id: projectId, type: kind, name: data.name, notes: data.notes || null,
+        status: 'todo', owner_id: data.owner_id || null,
+        end_date: data.end_date || null,
+        start_date: new Date().toISOString().slice(0, 10),
+        effort_min: 0, priority: 'normal', progress: 0, flagged: true,
+        sort_order: (Date.now() % 2000000000),
+      };
+      const { data: task, error: tErr } = await supabase.from('tasks').insert(taskRec).select().single();
+      if (tErr) throw new Error(tErr.message);
+      (db._cache = db._cache || {});
+      (db._cache.tasks = db._cache.tasks || []).push(task);
+
+      // 2. Insert meeting_item, wait for confirmation
+      const { data: mi, error: miErr } = await supabase
+        .from('meeting_items')
+        .insert({ task_id: task.id, kind, resolved: false, carried_from: null })
+        .select().single();
+      if (miErr) throw new Error(miErr.message);
+      (db._cache.meeting_items = db._cache.meeting_items || []).push(mi);
+
+      // 3. Insert link — safe now that both parents exist server-side
+      const { data: link, error: lErr } = await supabase
+        .from('meeting_item_links')
+        .insert({ meeting_item_id: mi.id, meeting_id: meetingId })
+        .select().single();
+      if (lErr) throw new Error(lErr.message);
+      (db._cache.meeting_item_links = db._cache.meeting_item_links || []).push(link);
+
       onDone(task);
     },
   });

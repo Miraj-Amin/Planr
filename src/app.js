@@ -224,8 +224,8 @@ function renderApp() {
       db, projectId: A.project,
       onSelectMeeting: id => { A.meeting=id; renderApp(); },
       onSelectTask:    id => { A.sel=A.sel===id?null:id; renderApp(); },
-      onAddAgenda:     () => newMeetingItemForm(db,A.project,A.meeting,'agenda',  ()=>renderApp()),
-      onAddFollowup:   () => newMeetingItemForm(db,A.project,A.meeting,'followup',()=>renderApp()),
+      onAddAgenda:     () => newMeetingItemForm(db,supabase,A.project,A.meeting,'agenda',()=>renderApp()),
+      onAddFollowup:   () => newMeetingItemForm(db,supabase,A.project,A.meeting,'followup',()=>renderApp()),
       onRerender:      () => renderApp(),
     });
     const createMeeting = () => newMeetingForm(db, A.project, m => {
