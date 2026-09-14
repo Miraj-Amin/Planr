@@ -266,6 +266,7 @@ function renderApp() {
       mount:            document.getElementById('contactsMount'),
       people:           db.all('people'),
       project_contacts: db.all('project_contacts'),
+      projects:         db.all('projects'),
       projectId:        A.project,
       project:          db.get('projects', A.project),
       db,
