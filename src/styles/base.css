@@ -503,3 +503,17 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 /* Also make card title area feel clickable */
 .tpl-open-btn{cursor:pointer}
 .tpl-card-name.tpl-open-btn:hover{color:#534AB7}
+
+/* ── Template editor: hierarchical rows ── */
+.te-name-cell{display:flex;align-items:center;gap:6px;min-width:0}
+.te-name-cell .te-name-in{flex:1;min-width:0}
+.te-milestone-toggle{background:transparent;border:0;padding:2px;cursor:pointer;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:20px;height:20px;transition:background 100ms}
+.te-milestone-toggle:hover{background:rgba(186,117,23,.1)}
+.te-add-deliv{background:transparent;border:0;padding:3px;cursor:pointer;color:#C4C9D4;border-radius:4px;display:none;align-items:center;justify-content:center;flex-shrink:0;width:22px;height:22px}
+.te-add-deliv:hover{background:rgba(29,158,117,.1);color:#1D9E75}
+.te-row-task:hover .te-add-deliv,
+.te-row-milestone:hover .te-add-deliv{display:inline-flex}
+.te-row-milestone .te-name-in{color:#8A5A0F}
+.te-row-deliverable td{background:rgba(29,158,117,.03)}
+.te-row-deliverable .te-name-in{color:#374151;font-size:11.5px}
+.te-row-phase{display:none}   /* phases render as section headers, not rows */

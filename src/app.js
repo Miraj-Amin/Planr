@@ -76,9 +76,10 @@ async function openProject(projId) {
 }
 
 // ── create a project from a template ───────────────────────────────────────
-// Takes { name, client_org, startDate, tasks (from template_tasks), roleMap,
-// sourceTemplate } and builds a project with a phase parent + child tasks,
-// computing start/end dates from workday offsets.
+// Walks the template's Phase → Task/Milestone → Deliverable tree and mirrors
+// it in the target project: phase rows become phase-type tasks, each child
+// task hangs off its phase, and template deliverables become entries in the
+// project's `deliverables` table (linked back via the task's deliverable_id).
 async function createProjectFromTemplate({ name, client_org, startDate, tasks, roleMap, sourceTemplate }) {
   showLoading('Creating project…');
 
@@ -88,7 +89,6 @@ async function createProjectFromTemplate({ name, client_org, startDate, tasks, r
     const { data, error } = await supabase.rpc('create_project_for_user', { p_name: name });
     if (error) throw error;
     proj = data;
-    // Some Supabase configs return an array; unwrap
     if (Array.isArray(proj)) proj = proj[0];
   } catch (e) {
     console.error(e);
@@ -97,48 +97,59 @@ async function createProjectFromTemplate({ name, client_org, startDate, tasks, r
     return;
   }
 
-  // Patch the client on the fresh project
-  if (client_org) {
-    db.update('projects', proj.id, { client_org });
-  }
+  if (client_org) db.update('projects', proj.id, { client_org });
 
-  // 2. Group tasks by phase; each phase gets a parent row that children hang off.
-  const byPhase = new Map();
-  tasks.forEach(t => {
-    const k = t.phase || '(uncategorised)';
-    if (!byPhase.has(k)) byPhase.set(k, []);
-    byPhase.get(k).push(t);
+  // 2. Rebuild the tree from the template. `tasks` is the flat list the
+  //    templates view already filtered by selected phase — but for hierarchy
+  //    we also need the parent chain. Pull everything from cache and let the
+  //    parent_id chain do the heavy lifting.
+  const templateRows = db.all('template_tasks').filter(r => r.template_id === sourceTemplate.id);
+  const childrenOf = new Map();
+  templateRows.forEach(r => {
+    const k = r.parent_id || 'root';
+    if (!childrenOf.has(k)) childrenOf.set(k, []);
+    childrenOf.get(k).push(r);
   });
+  childrenOf.forEach(arr => arr.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+
+  // Which phases to include — the caller passed a filtered `tasks` list; pull
+  // phase names from that so we only take the ones the user ticked.
+  const wantedPhaseNames = new Set(tasks.map(t => t.phase).filter(Boolean));
+  const phasesToUse = (childrenOf.get('root') || []).filter(p => wantedPhaseNames.has(p.name));
 
   let sortOrder = 100;
-  for (const [phaseName, phaseTasks] of byPhase.entries()) {
-    // Phase parent — await so children can safely reference parent_id.
-    const parent = await db.insertAwait('tasks', {
-      project_id: proj.id,
-      name: phaseName,
-      type: 'phase',
-      status: 'todo',
-      sort_order: sortOrder,
-      created_at: new Date().toISOString(),
+  for (const phase of phasesToUse) {
+    // Create the phase parent as a task with type='phase'
+    const projPhase = await db.insertAwait('tasks', {
+      project_id:  proj.id,
+      name:        phase.name,
+      type:        'phase',
+      status:      'todo',
+      phase:       phase.name,
+      sort_order:  sortOrder,
+      created_at:  new Date().toISOString(),
     });
-    sortOrder += 100;
+    sortOrder += 1000;
 
-    // Children can go in parallel now that the parent has committed.
-    const childInserts = phaseTasks.map(tt => {
+    const phaseChildren = (childrenOf.get(phase.id) || []).filter(c => c.type !== 'deliverable');
+
+    // Create each task in parallel (they only reference the already-committed phase)
+    const insertedTasks = await Promise.all(phaseChildren.map(async tt => {
       const start = addWorkdays(startDate, tt.start_offset_workdays || 0);
       const end   = addWorkdays(start,     Math.max(0, (tt.duration_workdays || 1) - 1));
-      const rec = {
+      const isMilestone = tt.type === 'milestone';
+      const projTask = await db.insertAwait('tasks', {
         project_id:            proj.id,
-        parent_id:             parent.id,
+        parent_id:             projPhase.id,
         name:                  tt.name,
-        type:                  tt.is_milestone ? 'milestone' : 'task',
+        type:                  isMilestone ? 'milestone' : 'task',
         status:                'todo',
         progress:              0,
         rag:                   'green',
         wbs:                   tt.wbs || null,
         workstream:            tt.workstream || null,
-        phase:                 phaseName,
-        is_milestone:          !!tt.is_milestone,
+        phase:                 phase.name,
+        is_milestone:          isMilestone,
         owner_id:              tt.owner_role       ? (roleMap[tt.owner_role]       || null) : null,
         accountable_id:        tt.accountable_role ? (roleMap[tt.accountable_role] || null) : null,
         duration_workdays:     tt.duration_workdays || null,
@@ -149,10 +160,34 @@ async function createProjectFromTemplate({ name, client_org, startDate, tasks, r
         acceptance_criteria:   tt.acceptance_criteria || null,
         sort_order:            (sortOrder += 10),
         created_at:            new Date().toISOString(),
-      };
-      return db.insertAwait('tasks', rec);
+      });
+      return { projTask, templateRow: tt, endDate: isoDate(end) };
+    }));
+
+    // For each new task, insert its deliverables into the project's `deliverables` table
+    // and link the first one back via the task's deliverable_id so the plan grid shows it.
+    const delivWork = [];
+    insertedTasks.forEach(({ projTask, templateRow, endDate }) => {
+      const templateDelivs = (childrenOf.get(templateRow.id) || []).filter(c => c.type === 'deliverable');
+      templateDelivs.forEach((td, i) => {
+        delivWork.push({ projTask, endDate, td, isFirst: i === 0 });
+      });
     });
-    await Promise.all(childInserts);
+    if (delivWork.length) {
+      const inserted = await Promise.all(delivWork.map(({ projTask, endDate, td }, i) => db.insertAwait('deliverables', {
+        project_id: proj.id,
+        name:       td.name,
+        status:     'not-started',
+        due_date:   endDate,
+        sort_order: 100 + i,
+        created_at: new Date().toISOString(),
+      })));
+      // Link the first deliverable of each task back to that task
+      for (let i = 0; i < delivWork.length; i++) {
+        const { projTask, isFirst } = delivWork[i];
+        if (isFirst) db.update('tasks', projTask.id, { deliverable_id: inserted[i].id });
+      }
+    }
   }
 
   await openProject(proj.id);
@@ -311,6 +346,9 @@ function renderApp() {
 
     if (A.homeView === 'templates') {
       if (A.templateId) {
+        // renderTemplateEdit is async because it may run a migration on open.
+        // We don't await it here — the view mounts its own loading state and
+        // rerenders itself via onRerender once migration finishes.
         renderTemplateEdit({
           mount,
           templateId: A.templateId,

@@ -26,7 +26,9 @@ export function renderTemplates({ mount, templates, template_tasks, projects, pe
   const rows = (templates || []).slice().sort((a, b) =>
     (b.created_at || '').localeCompare(a.created_at || ''));
 
-  const countFor = tid => (template_tasks || []).filter(t => t.template_id === tid).length;
+  const countFor = tid => (template_tasks || []).filter(t =>
+    t.template_id === tid && (t.type === 'task' || t.type === 'milestone' || !t.type)
+  ).length;
   const phasesFor = tid => {
     const set = new Set();
     (template_tasks || []).filter(t => t.template_id === tid).forEach(t => t.phase && set.add(t.phase));
@@ -214,24 +216,75 @@ function openImportPreview(parsed, db, onDone) {
     const name = modal.querySelector('#tplImportName').value.trim() || parsed.name;
     const desc = modal.querySelector('#tplImportDesc').value.trim();
     btn.disabled = true;
-    btn.textContent = `Saving ${parsed.tasks.length} tasks…`;
+    btn.textContent = `Saving…`;
     try {
-      // Await the template row landing in the DB before firing its children —
-      // otherwise the child inserts hit the FK constraint before the parent
-      // has committed.
+      // 1. Create template row and wait for it to land — the FK cascade below
+      //    requires the template row to exist in the DB, not just the cache.
       const tpl = await db.insertAwait('templates', {
         name, description: desc || null,
         source: 'excel_import',
         created_at: new Date().toISOString(),
       });
-      // Now the parent row exists in the DB — children can run in parallel.
-      await Promise.all(parsed.tasks.map((t, i) =>
-        db.insertAwait('template_tasks', {
+
+      // 2. Build a hierarchy in three rounds:
+      //    - Round A: one phase row per unique phase
+      //    - Round B: one task row per Excel row, parented to its phase
+      //    - Round C: one deliverable row per Excel row that has a primary_deliverable,
+      //              parented to its task
+      //    Within each round the inserts run in parallel; between rounds we wait so
+      //    downstream rows can reference the ids just written.
+      const phaseNames = [];
+      const seen = new Set();
+      for (const t of parsed.tasks) {
+        const p = t.phase || '(No phase)';
+        if (!seen.has(p)) { seen.add(p); phaseNames.push(p); }
+      }
+      btn.textContent = `Saving ${phaseNames.length} phases…`;
+
+      // Pre-generate all IDs so children can reference parents without waiting on each other.
+      const phaseIds = new Map(phaseNames.map(name => [name, crypto.randomUUID()]));
+      const taskIds  = parsed.tasks.map(() => crypto.randomUUID());
+
+      // Round A — phases
+      await Promise.all(phaseNames.map((name, i) => db.insertAwait('template_tasks', {
+        id:          phaseIds.get(name),
+        template_id: tpl.id,
+        parent_id:   null,
+        type:        'phase',
+        name,
+        phase:       name,
+        sort_order:  (i + 1) * 10000,
+      })));
+
+      // Round B — tasks / milestones
+      btn.textContent = `Saving ${parsed.tasks.length} tasks…`;
+      await Promise.all(parsed.tasks.map((t, i) => {
+        const phaseName = t.phase || '(No phase)';
+        return db.insertAwait('template_tasks', {
           ...t,
+          id:          taskIds[i],
           template_id: tpl.id,
-          sort_order: (i + 1) * 100,
-        })
-      ));
+          parent_id:   phaseIds.get(phaseName),
+          type:        t.is_milestone ? 'milestone' : 'task',
+          sort_order:  (i + 1) * 100,
+        });
+      }));
+
+      // Round C — deliverables
+      const delivs = parsed.tasks
+        .map((t, i) => ({ t, taskId: taskIds[i] }))
+        .filter(({ t }) => t.primary_deliverable && String(t.primary_deliverable).trim());
+      if (delivs.length) {
+        btn.textContent = `Saving ${delivs.length} deliverables…`;
+        await Promise.all(delivs.map(({ t, taskId }) => db.insertAwait('template_tasks', {
+          template_id: tpl.id,
+          parent_id:   taskId,
+          type:        'deliverable',
+          name:        t.primary_deliverable,
+          sort_order:  100,
+        })));
+      }
+
       close();
       onDone?.();
     } catch (err) {
@@ -244,9 +297,13 @@ function openImportPreview(parsed, db, onDone) {
 
 // ─── Create project from template ─────────────────────────────────────
 function openCreateFromTemplate(tpl, tplTasks, people, db, onCreateProject) {
-  const phases = [...new Set(tplTasks.map(t => t.phase).filter(Boolean))];
+  // In the hierarchical model tplTasks contains phase rows, task/milestone
+  // rows, and deliverable rows. For picking phases and mapping roles we
+  // only care about the actual work items (tasks and milestones).
+  const workRows = tplTasks.filter(t => t.type === 'task' || t.type === 'milestone' || !t.type);
+  const phases = [...new Set(workRows.map(t => t.phase).filter(Boolean))];
   const roleSet = new Set();
-  tplTasks.forEach(t => {
+  workRows.forEach(t => {
     if (t.owner_role)       roleSet.add(t.owner_role);
     if (t.accountable_role) roleSet.add(t.accountable_role);
   });
@@ -340,7 +397,10 @@ function openCreateFromTemplate(tpl, tplTasks, people, db, onCreateProject) {
       if (sel.value) roleMap[sel.dataset.role] = sel.value;
     });
 
-    const tasksToUse = tplTasks.filter(t => !t.phase || selectedPhases.has(t.phase));
+    // Pass only the tasks/milestones — the phase list is derived from these
+    // and the createProjectFromTemplate walker resolves phases and
+    // deliverables by walking the parent_id chain.
+    const tasksToUse = workRows.filter(t => !t.phase || selectedPhases.has(t.phase));
     if (!tasksToUse.length) { alert('Pick at least one phase.'); return; }
 
     onCreateProject({

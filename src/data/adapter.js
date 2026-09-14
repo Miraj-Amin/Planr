@@ -14,6 +14,7 @@ export class LocalAdapter {
   insert(t, rec){ rec.id = rec.id || (t.slice(0,2)+'_'+Math.random().toString(36).slice(2,9));
                   (this.db[t]=this.db[t]||[]).push(rec); this._persist(); return rec; }
   insertAwait(t, rec) { return Promise.resolve(this.insert(t, rec)); }
+  updateAwait(t, id, patch) { return Promise.resolve(this.update(t, id, patch)); }
   update(t, id, patch){ const r=this.get(t,id); if(r){Object.assign(r,patch);this._persist();} return r; }
   remove(t, id) { this.db[t]=(this.db[t]||[]).filter(r=>r.id!==id); this._persist(); }
 }
@@ -149,6 +150,16 @@ export class SupabaseAdapter {
       throw new Error(`Insert [${t}] failed: ${error.message}`);
     }
     return rec;
+  }
+
+  // Awaitable update, used during template migrations where subsequent writes
+  // rely on the patched row being current in the DB.
+  async updateAwait(t, id, patch) {
+    const r = this.get(t, id);
+    if (r) Object.assign(r, patch);
+    const { error } = await this.sb.from(t).update(patch).eq('id', id);
+    if (error) throw new Error(`Update [${t}] failed: ${error.message}`);
+    return r;
   }
 
   update(t, id, patch) {
