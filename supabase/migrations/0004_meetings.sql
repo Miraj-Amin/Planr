@@ -2,7 +2,7 @@
 -- 0004_meetings.sql — meetings + carry-forward item links
 -- ============================================================
 
-create type item_kind as enum ('agenda','followup');
+create type item_kind as enum ('agenda','followup','action');
 
 create table meetings (
   id           uuid primary key default gen_random_uuid(),
@@ -36,6 +36,7 @@ create index meeting_items_task_idx on meeting_items(task_id);
 create table meeting_item_links (
   meeting_item_id uuid references meeting_items(id) on delete cascade,
   meeting_id      uuid references meetings(id)      on delete cascade,
+  on_agenda       boolean not null default false,
   id              uuid primary key default gen_random_uuid(),
   unique (meeting_item_id, meeting_id)
 );

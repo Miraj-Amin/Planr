@@ -230,11 +230,13 @@ function renderApp() {
       onSelectMeeting: id => { A.meeting=id; renderApp(); },
       onSelectTask:    id => { A.sel=A.sel===id?null:id; renderApp(); },
       onAddAgenda:     () => newMeetingItemForm(db,supabase,A.project,A.meeting,'agenda',()=>renderApp()),
-      onAddFollowup:   () => newMeetingItemForm(db,supabase,A.project,A.meeting,'followup',()=>renderApp()),
+      onAddFollowup:   () => newMeetingItemForm(db,supabase,A.project,A.meeting,'action',()=>renderApp()),
       onRerender:      () => renderApp(),
     });
     const createMeeting = () => newMeetingForm(db, A.project, m => {
-      // Carry forward all unresolved items from prior meetings
+      // Carry forward all unresolved items from prior meetings.
+      // They land on the NEW meeting's AGENDA (on_agenda=true) so they get
+      // discussed — that's the whole point of a carry-forward.
       const items = db.all('meeting_items');
       const links = db.all('meeting_item_links');
       const projectTasks = db.all('tasks').filter(t => t.project_id === A.project);
@@ -244,10 +246,9 @@ function renderApp() {
         if (!task) return;
         if (item.resolved) return;
         if (task.status === 'done') return;
-        // Check not already linked to this new meeting
         const already = links.some(l => l.meeting_item_id === item.id && l.meeting_id === m.id);
         if (!already) {
-          db.insert('meeting_item_links', { meeting_item_id: item.id, meeting_id: m.id });
+          db.insert('meeting_item_links', { meeting_item_id: item.id, meeting_id: m.id, on_agenda: true });
         }
       });
       A.meeting = m.id;

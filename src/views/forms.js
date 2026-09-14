@@ -171,9 +171,12 @@ export function newMeetingForm(db, projectId, onDone) {
 }
 
 // ── MEETING ITEM ──────────────────────────────────────────────────────────────
-export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onDone) {
+// mode: 'agenda' means item goes on this meeting's agenda; 'action' means it's
+//   captured as a resulting action/follow-up (not on this meeting's agenda).
+// Within both, the user picks the intrinsic KIND: 'action' or 'followup'.
+export function newMeetingItemForm(db, supabase, projectId, meetingId, mode, onDone) {
   const people = db.all('people');
-  const isFollowup = kind === 'followup';
+  const isAgenda = mode === 'agenda';
 
   // Build channel options from existing meeting_items + defaults
   const tasksInProject = new Set(db.all('tasks').filter(t => t.project_id === projectId).map(t => t.id));
@@ -186,17 +189,15 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
   const channelOptions = [...new Set(['Email', 'Meeting', ...existingChannels])]
     .map(c => ({ value: c, label: c }));
 
-  // Related-to picker: any project task that isn't itself an agenda/followup
-  // (Agenda + follow-up items already live under meetings — don't nest them further)
+  // Related-to picker: any project task that isn't itself an action or followup
   const parentCandidates = db.all('tasks')
     .filter(t =>
       t.project_id === projectId &&
-      t.type !== 'agenda' &&
+      t.type !== 'action' && t.type !== 'agenda' &&  // exclude action + legacy 'agenda'
       t.type !== 'followup'
     )
     .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
 
-  // Build breadcrumb labels for context (e.g. "Phase 1 › Requirements")
   const taskById = new Map(parentCandidates.map(t => [t.id, t]));
   const breadcrumb = (t) => {
     const parts = [t.name];
@@ -212,33 +213,35 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
   const parentOptions = parentCandidates.map(t => ({ value: t.id, label: breadcrumb(t) }));
 
   openModal({
-    title: isFollowup ? 'Capture follow-up' : 'Add agenda item',
+    title: isAgenda ? 'Add to agenda' : 'Capture action / follow-up',
     fields: [
-      { key:'name',     label:isFollowup?'Action / follow-up':'Agenda topic',
-        type:'text', required:true, placeholder:isFollowup?'What was agreed?':'What needs to be discussed?' },
+      { key:'name', label: isAgenda ? 'Topic' : 'What was agreed?',
+        type:'text', required:true },
+      { key:'kind', label:'Type', type:'select', value: isAgenda ? 'action' : 'followup',
+        options:[
+          { value:'action',   label:'Action' },
+          { value:'followup', label:'Follow-up' },
+        ],
+        hint: isAgenda
+          ? 'Agenda items can be either — pick what best describes it.'
+          : 'Follow-ups are things communicated after the meeting; actions are things done.' },
       { key:'parent_id', label:'Related task', type:'select', placeholder:'None — top-level item',
         options: parentOptions,
         hint:'If related to an existing task, it will appear nested under that task in the Plan.' },
-      { key:'owner_id', label:'Owner', type:'select', required:isFollowup,
-        placeholder:isFollowup?'Who owns this?':'Optional owner',
-        options:people.map(p=>({value:p.id,label:p.name+(p.is_client?' (client)':'')})) },
-      ...(isFollowup
-        ? [
-            { key:'end_date', label:'Due date', type:'date', required:true },
-            { key:'channel',  label:'Channel',  type:'select', placeholder:'How will this happen?',
-              options: channelOptions,
-              hint:'To add a new channel not in this list, save this follow-up first, then use the "+ New channel…" option on the item.' },
-          ]
-        : [{ key:'end_date', label:'Target date', type:'date' }]),
+      { key:'owner_id', label:'Owner', type:'select', required: !isAgenda,
+        placeholder: isAgenda ? 'Optional owner' : 'Who owns this?',
+        options: people.map(p => ({ value: p.id, label: p.name + (p.is_client ? ' (client)' : '') })) },
+      { key:'end_date', label: isAgenda ? 'Target date' : 'Due date', type:'date', required: !isAgenda },
+      { key:'channel', label:'Channel', type:'select', placeholder:'Optional — how will this happen?',
+        options: channelOptions,
+        hint:'Only relevant for follow-ups. To add a new channel, save first, then use "+ New channel…" on the item.' },
       { key:'notes', label:'Notes', type:'textarea', placeholder:'Optional…' },
     ],
-    submitLabel: isFollowup ? 'Capture follow-up' : 'Add to agenda',
+    submitLabel: isAgenda ? 'Add to agenda' : 'Capture',
     onSubmit: async data => {
-      // Sequential inserts — each FK-dependent record must exist server-side
-      // before the next one references it. Fire-and-forget causes the link
-      // to hit Supabase before the item is saved.
+      const kind = data.kind || (isAgenda ? 'action' : 'followup');
 
-      // 1. Insert task, wait for confirmation
+      // 1. Insert task
       const taskRec = {
         project_id: projectId, type: kind, name: data.name, notes: data.notes || null,
         status: 'todo', owner_id: data.owner_id || null,
@@ -253,9 +256,9 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
       (db._cache = db._cache || {});
       (db._cache.tasks = db._cache.tasks || []).push(task);
 
-      // 2. Insert meeting_item, wait for confirmation (channel only on follow-ups)
+      // 2. Insert meeting_item
       const miRec = { task_id: task.id, kind, resolved: false, carried_from: null };
-      if (isFollowup && data.channel) miRec.channel = data.channel;
+      if (kind === 'followup' && data.channel) miRec.channel = data.channel;
       const { data: mi, error: miErr } = await supabase
         .from('meeting_items')
         .insert(miRec)
@@ -263,10 +266,10 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
       if (miErr) throw new Error(miErr.message);
       (db._cache.meeting_items = db._cache.meeting_items || []).push(mi);
 
-      // 3. Insert link — safe now that both parents exist server-side
+      // 3. Insert link with on_agenda flag
       const { data: link, error: lErr } = await supabase
         .from('meeting_item_links')
-        .insert({ meeting_item_id: mi.id, meeting_id: meetingId })
+        .insert({ meeting_item_id: mi.id, meeting_id: meetingId, on_agenda: isAgenda })
         .select().single();
       if (lErr) throw new Error(lErr.message);
       (db._cache.meeting_item_links = db._cache.meeting_item_links || []).push(link);

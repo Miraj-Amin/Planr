@@ -5,7 +5,7 @@
 -- ============================================================
 
 create type task_type as enum
-  ('phase','task','milestone','deliverable','agenda','followup');
+  ('phase','task','milestone','deliverable','agenda','followup','action');
 
 create type task_status as enum
   ('todo','in-progress','blocked','review','done');

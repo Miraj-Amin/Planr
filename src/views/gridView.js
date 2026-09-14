@@ -19,7 +19,7 @@ const ALL_COLS = [
 ];
 
 const STATUSES = [['todo','To do'],['in-progress','In progress'],['blocked','Blocked'],['review','Review'],['done','Done']];
-const TYPES    = [['task','Task'],['deliverable','Deliverable'],['milestone','Milestone'],['phase','Phase'],['meeting','Meeting'],['agenda','Agenda'],['followup','Follow-up']];
+const TYPES    = [['task','Task'],['deliverable','Deliverable'],['milestone','Milestone'],['phase','Phase'],['meeting','Meeting'],['action','Action'],['followup','Follow-up']];
 const EFFORT   = [[0,'—'],[15,'15m'],[30,'30m'],[60,'1h'],[120,'2h'],[240,'4h'],[480,'1d'],[960,'2d'],[2400,'1w']];
 
 let _sortSeq = 1_000_000;

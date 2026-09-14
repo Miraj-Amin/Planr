@@ -26,10 +26,16 @@ export function renderMeetings({
   const byId = new Map(tasks.map(t => [t.id, t]));
 
   function itemsForMeeting(mid) {
-    const linkIds = new Set(meeting_item_links.filter(l => l.meeting_id === mid).map(l => l.meeting_item_id));
+    const linksForMeeting = meeting_item_links.filter(l => l.meeting_id === mid);
+    const linkByItemId = new Map(linksForMeeting.map(l => [l.meeting_item_id, l]));
     return meeting_items
-      .filter(mi => linkIds.has(mi.id))
-      .map(mi => ({ ...mi, task: byId.get(mi.task_id) }))
+      .filter(mi => linkByItemId.has(mi.id))
+      .map(mi => ({
+        ...mi,
+        task: byId.get(mi.task_id),
+        link: linkByItemId.get(mi.id),
+        on_agenda: !!linkByItemId.get(mi.id)?.on_agenda,
+      }))
       .filter(x => x.task);
   }
 
@@ -70,8 +76,12 @@ export function renderMeetings({
 
   if (cur) {
     const items = itemsForMeeting(cur.id);
-    const agenda = items.filter(x => x.kind === 'agenda');
-    const follow = items.filter(x => x.kind === 'followup');
+    // NEW model:
+    //  - each item has an intrinsic KIND: 'action' or 'followup'
+    //  - each link has ON_AGENDA (per-meeting): whether to appear in Agenda section here
+    // So an action can sit as an agenda item in one meeting and not in another.
+    const agenda = items.filter(x => x.on_agenda);
+    const follow = items.filter(x => !x.on_agenda);
     const openA = agenda.filter(x => !(x.resolved || x.task.status === 'done')).length;
     const openF = follow.filter(x => !(x.resolved || x.task.status === 'done')).length;
 
@@ -114,9 +124,6 @@ export function renderMeetings({
       const done = x.resolved || t.status === 'done';
       const over = isOverdue(t);
       const others = meeting_item_links.filter(l => l.meeting_item_id === x.id && l.meeting_id !== cur.id).length;
-      const iconClr = x.kind === 'agenda' ? '#378ADD' : '#D4716A';
-      const iconTi  = x.kind === 'agenda' ? 'message-circle' : 'arrow-forward';
-
       return `<div class="item" data-item="${x.id}" data-task="${t.id}" data-kind="${x.kind}">
         <div class="item-check-wrap">
           <i class="ti ti-${done ? 'circle-check' : 'circle'} ck item-check" data-item="${x.id}"
@@ -143,10 +150,15 @@ export function renderMeetings({
             ${others ? `<span><i class="ti ti-link" style="font-size:11px;vertical-align:-1px"></i>${others} other meeting${others > 1 ? 's' : ''}</span>` : ''}
             <span class="item-actions">
               <select class="item-kind" data-item="${x.id}" title="Change item type"
-                      style="border:.5px solid rgba(0,0,0,.15);background:#fff;color:${x.kind==='agenda' ? '#185FA5' : '#993C1D'};font-size:10px;cursor:pointer;padding:3px 6px;border-radius:6px;font-weight:500">
-                <option value="agenda"   ${x.kind==='agenda'   ? 'selected' : ''}>Agenda</option>
-                <option value="followup" ${x.kind==='followup' ? 'selected' : ''}>Action / follow-up</option>
+                      style="border:.5px solid rgba(0,0,0,.15);background:#fff;color:${x.kind==='followup' ? '#993C1D' : '#185FA5'};font-size:10px;cursor:pointer;padding:3px 6px;border-radius:6px;font-weight:500">
+                <option value="action"   ${(x.kind==='action' || x.kind==='agenda') ? 'selected' : ''}>Action</option>
+                <option value="followup" ${x.kind==='followup' ? 'selected' : ''}>Follow-up</option>
               </select>
+              <label class="item-on-agenda" data-item="${x.id}" title="On this meeting's agenda"
+                     style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:${x.on_agenda ? '#185FA5' : '#9CA3AF'};cursor:pointer;padding:3px 6px;border:.5px solid rgba(0,0,0,.15);border-radius:6px;background:${x.on_agenda ? 'rgba(55,138,221,.08)' : '#fff'};font-weight:500;user-select:none">
+                <input type="checkbox" ${x.on_agenda ? 'checked' : ''} style="width:11px;height:11px;margin:0;accent-color:#378ADD;cursor:pointer">
+                On agenda
+              </label>
               <button class="item-delete" data-item="${x.id}"
                       style="border:0;background:transparent;color:#C4C9D4;font-size:12px;cursor:pointer;padding:3px 6px;border-radius:4px" title="Remove from meeting">
                 <i class="ti ti-x"></i> Remove
@@ -250,7 +262,7 @@ export function renderMeetings({
       const meetingId = btn.dataset.meeting;
       const exists = meeting_item_links.some(l => l.meeting_item_id === itemId && l.meeting_id === meetingId);
       if (!exists) {
-        db.insert('meeting_item_links', { meeting_item_id: itemId, meeting_id: meetingId });
+        db.insert('meeting_item_links', { meeting_item_id: itemId, meeting_id: meetingId, on_agenda: true });
         onRerender?.();
       }
     });
@@ -330,7 +342,7 @@ export function renderMeetings({
     });
   });
 
-  // Change item kind (agenda ↔ follow-up) via dropdown
+  // Change item kind (action ↔ follow-up) via dropdown
   mount.querySelectorAll('.item-kind').forEach(sel => {
     sel.addEventListener('change', e => {
       e.stopPropagation();
@@ -343,8 +355,22 @@ export function renderMeetings({
       db.update('tasks', item.task_id, { type: newKind });
       onRerender?.();
     });
-    // Prevent the item row click handler from firing on dropdown clicks
     sel.addEventListener('click', e => e.stopPropagation());
+  });
+
+  // Toggle "On this meeting's agenda" — flips the link's on_agenda flag
+  mount.querySelectorAll('.item-on-agenda').forEach(label => {
+    label.addEventListener('click', e => e.stopPropagation());
+    const cb = label.querySelector('input[type="checkbox"]');
+    cb.addEventListener('change', e => {
+      e.stopPropagation();
+      if (!cur) return;
+      const itemId = label.dataset.item;
+      const link = meeting_item_links.find(l => l.meeting_item_id === itemId && l.meeting_id === cur.id);
+      if (!link) return;
+      db.update('meeting_item_links', link.id, { on_agenda: cb.checked });
+      onRerender?.();
+    });
   });
 
   // Remove item from meeting (unlink, not delete)
