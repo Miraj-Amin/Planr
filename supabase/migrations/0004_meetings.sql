@@ -35,5 +35,6 @@ create index meeting_items_task_idx on meeting_items(task_id);
 create table meeting_item_links (
   meeting_item_id uuid references meeting_items(id) on delete cascade,
   meeting_id      uuid references meetings(id)      on delete cascade,
-  primary key (meeting_item_id, meeting_id)
+  id              uuid primary key default gen_random_uuid(),
+  unique (meeting_item_id, meeting_id)
 );

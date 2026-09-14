@@ -1,3 +1,4 @@
+import { openModal } from './modal.js';
 // contactsView.js — Project contacts list.
 // - Every project has an internal contacts section (Solusign team) — auto-visible for all projects
 // - Client contacts section — project-specific, linked via project_contacts table
@@ -73,45 +74,71 @@ export function renderContacts({
       </div>
     </div>`;
 
-  // ── Add contact ──
+  // ── Add contact via modal ──
   mount.querySelector('#addContactBtn')?.addEventListener('click', () => {
-    const name = prompt('Contact name:');
-    if (!name || !name.trim()) return;
-    const trimmedName = name.trim();
+    openModal({
+      title: 'Add contact',
+      fields: [
+        {
+          key: 'name',
+          label: 'Full name',
+          type: 'text',
+          required: true,
+          placeholder: 'e.g. Alice Smith',
+        },
+        {
+          key: 'kind',
+          label: 'Type',
+          type: 'select',
+          value: 'client',
+          options: [
+            { value: 'client',   label: `Client · ${project?.client_org || 'this project only'}` },
+            { value: 'internal', label: 'Internal · Solusign · visible on every project' },
+          ],
+        },
+        {
+          key: 'org',
+          label: 'Organisation',
+          type: 'text',
+          placeholder: `Default: ${project?.client_org || 'Client'} for client, Solusign for internal`,
+          hint: 'Leave blank to use the default for the type above.',
+        },
+        {
+          key: 'email',
+          label: 'Email',
+          type: 'text',
+          placeholder: 'Optional',
+        },
+      ],
+      submitLabel: 'Add contact',
+      onSubmit: data => {
+        const name = (data.name || '').trim();
+        if (!name) return;
+        const isInternal = data.kind === 'internal';
+        const org = (data.org && data.org.trim())
+          ? data.org.trim()
+          : (isInternal ? 'Solusign' : (project?.client_org || null));
 
-    const typeInput = prompt(
-      'Is this contact internal (Solusign team) or a client?\n\n' +
-      'Type "internal" or press Enter for client.'
-    );
-    const isInternal = (typeInput || '').trim().toLowerCase() === 'internal';
+        const initials = name.split(/\s+/).map(w => w[0] || '').join('').slice(0, 2).toUpperCase() || '?';
+        const palette = ['#5B7FCC', '#5B9E7F', '#9B67C2', '#C47B3E', '#D4716A', '#7F77DD', '#1D9E75', '#BA7517'];
+        const hash = [...name].reduce((a, c) => a + c.charCodeAt(0), 0);
+        const color = palette[hash % palette.length];
 
-    let org = null;
-    if (isInternal) {
-      org = 'Solusign';
-    } else {
-      const inp = prompt(`Organisation (or leave blank for "${project?.client_org || 'Client'}"):`);
-      org = (inp && inp.trim()) || project?.client_org || null;
-    }
+        const newPerson = db.insert('people', {
+          name, initials, color, is_client: !isInternal, org,
+          email: (data.email || '').trim() || null,
+        });
 
-    const initials = trimmedName.split(/\s+/).map(w => w[0] || '').join('').slice(0, 2).toUpperCase() || '?';
-    const palette = ['#5B7FCC', '#5B9E7F', '#9B67C2', '#C47B3E', '#D4716A', '#7F77DD', '#1D9E75', '#BA7517'];
-    const hash = [...trimmedName].reduce((a, c) => a + c.charCodeAt(0), 0);
-    const color = palette[hash % palette.length];
+        if (!isInternal) {
+          db.insert('project_contacts', {
+            project_id: projectId,
+            person_id: newPerson.id,
+          });
+        }
 
-    const newPerson = db.insert('people', {
-      name: trimmedName, initials, color, is_client: !isInternal, org,
+        onRerender?.();
+      },
     });
-
-    // Only link client contacts to this specific project.
-    // Internal contacts are visible everywhere automatically.
-    if (!isInternal) {
-      db.insert('project_contacts', {
-        project_id: projectId,
-        person_id: newPerson.id,
-      });
-    }
-
-    onRerender?.();
   });
 
   // ── Remove client contact from this project (does not delete the person) ──
