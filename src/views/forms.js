@@ -174,6 +174,18 @@ export function newMeetingForm(db, projectId, onDone) {
 export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onDone) {
   const people = db.all('people');
   const isFollowup = kind === 'followup';
+
+  // Build channel options from existing meeting_items + defaults
+  const tasksInProject = new Set(db.all('tasks').filter(t => t.project_id === projectId).map(t => t.id));
+  const existingChannels = [...new Set(
+    db.all('meeting_items')
+      .filter(mi => tasksInProject.has(mi.task_id))
+      .map(mi => mi.channel)
+      .filter(Boolean)
+  )];
+  const channelOptions = [...new Set(['Email', 'Meeting', ...existingChannels])]
+    .map(c => ({ value: c, label: c }));
+
   openModal({
     title: isFollowup ? 'Capture follow-up' : 'Add agenda item',
     fields: [
@@ -183,7 +195,12 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
         placeholder:isFollowup?'Who owns this?':'Optional owner',
         options:people.map(p=>({value:p.id,label:p.name+(p.is_client?' (client)':'')})) },
       ...(isFollowup
-        ? [{ key:'end_date', label:'Due date', type:'date', required:true }]
+        ? [
+            { key:'end_date', label:'Due date', type:'date', required:true },
+            { key:'channel',  label:'Channel',  type:'select', placeholder:'How will this happen?',
+              options: channelOptions,
+              hint:'To add a new channel not in this list, save this follow-up first, then use the "+ New channel…" option on the item.' },
+          ]
         : [{ key:'end_date', label:'Target date', type:'date' }]),
       { key:'notes', label:'Notes', type:'textarea', placeholder:'Optional…' },
     ],
@@ -207,10 +224,12 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
       (db._cache = db._cache || {});
       (db._cache.tasks = db._cache.tasks || []).push(task);
 
-      // 2. Insert meeting_item, wait for confirmation
+      // 2. Insert meeting_item, wait for confirmation (channel only on follow-ups)
+      const miRec = { task_id: task.id, kind, resolved: false, carried_from: null };
+      if (isFollowup && data.channel) miRec.channel = data.channel;
       const { data: mi, error: miErr } = await supabase
         .from('meeting_items')
-        .insert({ task_id: task.id, kind, resolved: false, carried_from: null })
+        .insert(miRec)
         .select().single();
       if (miErr) throw new Error(miErr.message);
       (db._cache.meeting_items = db._cache.meeting_items || []).push(mi);

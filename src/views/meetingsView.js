@@ -83,6 +83,31 @@ export function renderMeetings({
       return blank + opts;
     };
 
+    // ── Channel options for follow-up items ──
+    // Defaults + any distinct existing values across all meeting_items in this project.
+    // Users pick "+ New channel…" to add one.
+    const DEFAULT_CHANNELS = ['Email', 'Meeting'];
+    const existingChannels = [...new Set(
+      meeting_items
+        .filter(mi => byId.get(mi.task_id)?.project_id === projectId)
+        .map(mi => mi.channel)
+        .filter(Boolean)
+    )];
+    const availableChannels = [...new Set([...DEFAULT_CHANNELS, ...existingChannels])];
+
+    const CHANNEL_OPTS = (selectedChannel) => {
+      const blank = `<option value="" ${!selectedChannel ? 'selected' : ''}>Channel…</option>`;
+      // If the item's channel isn't in the default+existing list (edge case: user just added one), include it
+      const all = selectedChannel && !availableChannels.includes(selectedChannel)
+        ? [selectedChannel, ...availableChannels]
+        : availableChannels;
+      const opts = all.map(c =>
+        `<option value="${c}" ${c === selectedChannel ? 'selected' : ''}>${c}</option>`
+      ).join('');
+      const addNew = `<option value="__add_channel__" style="font-style:italic">+ New channel…</option>`;
+      return blank + opts + addNew;
+    };
+
     const itemHTML = (x) => {
       const t = x.task;
       const o = people.find(p => p.id === t.owner_id);
@@ -109,6 +134,12 @@ export function renderMeetings({
             ${isClient(t, people) ? `<span class="chip" style="background:rgba(186,117,23,.12);color:#854F0B"><i class="ti ti-user-star"></i>Client</span>` : ''}
             <input type="date" class="item-due" data-item="${x.id}" value="${t.end_date || ''}"
                    style="border:0;outline:0;background:transparent;font-size:10.5px;color:${over ? '#E24B4A' : '#9CA3AF'};font-family:monospace;cursor:pointer;padding:1px 3px;border-radius:4px">
+            ${x.kind === 'followup' ? `
+              <select class="item-channel" data-item="${x.id}" title="Channel"
+                      style="border:.5px solid rgba(0,0,0,.12);background:${x.channel ? 'rgba(83,74,183,.06)' : 'transparent'};color:${x.channel ? '#3C3489' : '#9CA3AF'};font-size:10px;cursor:pointer;padding:2px 6px;border-radius:5px;font-weight:500">
+                ${CHANNEL_OPTS(x.channel)}
+              </select>
+            ` : ''}
             ${others ? `<span><i class="ti ti-link" style="font-size:11px;vertical-align:-1px"></i>${others} other meeting${others > 1 ? 's' : ''}</span>` : ''}
             <span class="item-actions">
               <select class="item-kind" data-item="${x.id}" title="Change item type"
@@ -272,6 +303,29 @@ export function renderMeetings({
       const item = meeting_items.find(mi => mi.id === el.dataset.item);
       if (!item) return;
       db.update('tasks', item.task_id, { end_date: el.value || null });
+      onRerender?.();
+    });
+  });
+
+  // Channel change (follow-up items only)
+  mount.querySelectorAll('.item-channel').forEach(sel => {
+    sel.addEventListener('click', e => e.stopPropagation());
+    sel.addEventListener('change', () => {
+      const itemId = sel.dataset.item;
+      const item = meeting_items.find(mi => mi.id === itemId);
+      if (!item) return;
+
+      if (sel.value === '__add_channel__') {
+        const name = prompt('New channel name (e.g. Phone, Slack, Teams):');
+        const trimmed = (name || '').trim();
+        if (!trimmed) {
+          sel.value = item.channel || '';
+          return;
+        }
+        db.update('meeting_items', itemId, { channel: trimmed });
+      } else {
+        db.update('meeting_items', itemId, { channel: sel.value || null });
+      }
       onRerender?.();
     });
   });

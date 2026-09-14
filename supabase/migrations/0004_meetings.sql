@@ -28,7 +28,8 @@ create table meeting_items (
   task_id      uuid not null references tasks(id) on delete cascade,
   kind         item_kind not null,
   resolved     boolean not null default false,
-  carried_from uuid references meetings(id) on delete set null
+  carried_from uuid references meetings(id) on delete set null,
+  channel      text
 );
 create index meeting_items_task_idx on meeting_items(task_id);
 
