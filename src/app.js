@@ -6,7 +6,12 @@ import { renderBoard }       from './views/boardView.js';
 import { renderFocus }       from './views/focusView.js';
 import { renderMeetings }    from './views/meetingsView.js';
 import { renderContacts }    from './views/contactsView.js';
+import { renderTemplates }   from './views/templatesView.js';
+import { renderRisks }       from './views/risksView.js';
+import { renderGantt }       from './views/ganttView.js';
+import { renderDashboard }   from './views/dashboardView.js';
 import { showAuth }          from './views/authView.js';
+import { addWorkdays, isoDate } from './lib/workdays.js';
 import { newProjectForm, newTaskForm, newPhaseForm, newDeliverableForm,
          newMeetingForm, newMeetingItemForm, quickTaskForm } from './views/forms.js';
 
@@ -14,18 +19,23 @@ const taskSvc      = new TaskService(db);
 let   currentUserId = null;
 
 const VIEWS = [
-  { id:'plan',     icon:'ti-subtask',       label:'Plan' },
-  { id:'board',    icon:'ti-layout-kanban', label:'Board' },
-  { id:'focus',    icon:'ti-sun',           label:'Focus' },
-  { id:'meetings', icon:'ti-notebook',      label:'Meetings' },
-  { id:'contacts', icon:'ti-users',         label:'Contacts' },
+  { id:'plan',      icon:'ti-subtask',       label:'Plan' },
+  { id:'gantt',     icon:'ti-chart-gantt',   label:'Gantt' },
+  { id:'board',     icon:'ti-layout-kanban', label:'Board' },
+  { id:'focus',     icon:'ti-sun',           label:'Focus' },
+  { id:'meetings',  icon:'ti-notebook',      label:'Meetings' },
+  { id:'risks',     icon:'ti-flag',          label:'RAID' },
+  { id:'dashboard', icon:'ti-layout-dashboard', label:'Dashboard' },
+  { id:'contacts',  icon:'ti-users',         label:'Contacts' },
 ];
 
 // Home-level (all projects) views — shown when no project is selected
 const HOME_VIEWS = [
-  { id:'projects', icon:'ti-layout-grid',   label:'Projects' },
-  { id:'focus',    icon:'ti-sun',           label:'Focus' },
-  { id:'board',    icon:'ti-layout-kanban', label:'Board' },
+  { id:'projects',  icon:'ti-layout-grid',      label:'Projects' },
+  { id:'dashboard', icon:'ti-layout-dashboard', label:'Portfolio' },
+  { id:'focus',     icon:'ti-sun',              label:'Focus' },
+  { id:'board',     icon:'ti-layout-kanban',    label:'Board' },
+  { id:'templates', icon:'ti-template',         label:'Templates' },
 ];
 
 let A = {
@@ -61,6 +71,87 @@ async function openProject(projId) {
   showLoading('Loading project…');
   await db.load(projId);
   renderApp();
+}
+
+// ── create a project from a template ───────────────────────────────────────
+// Takes { name, client_org, startDate, tasks (from template_tasks), roleMap,
+// sourceTemplate } and builds a project with a phase parent + child tasks,
+// computing start/end dates from workday offsets.
+async function createProjectFromTemplate({ name, client_org, startDate, tasks, roleMap, sourceTemplate }) {
+  showLoading('Creating project…');
+
+  // 1. Create the project via the RPC used elsewhere so RLS/membership rows land right
+  let proj;
+  try {
+    const { data, error } = await supabase.rpc('create_project_for_user', { p_name: name });
+    if (error) throw error;
+    proj = data;
+    // Some Supabase configs return an array; unwrap
+    if (Array.isArray(proj)) proj = proj[0];
+  } catch (e) {
+    console.error(e);
+    alert(`Couldn't create the project: ${e.message}`);
+    await goHome();
+    return;
+  }
+
+  // Patch the client on the fresh project
+  if (client_org) {
+    db.update('projects', proj.id, { client_org });
+  }
+
+  // 2. Group tasks by phase; each phase gets a parent row that children hang off.
+  const byPhase = new Map();
+  tasks.forEach(t => {
+    const k = t.phase || '(uncategorised)';
+    if (!byPhase.has(k)) byPhase.set(k, []);
+    byPhase.get(k).push(t);
+  });
+
+  let sortOrder = 100;
+  for (const [phaseName, phaseTasks] of byPhase.entries()) {
+    // Phase parent
+    const parent = db.insert('tasks', {
+      project_id: proj.id,
+      name: phaseName,
+      type: 'phase',
+      status: 'todo',
+      sort_order: sortOrder,
+      created_at: new Date().toISOString(),
+    });
+    sortOrder += 100;
+
+    for (const tt of phaseTasks) {
+      const start = addWorkdays(startDate, tt.start_offset_workdays || 0);
+      const end   = addWorkdays(start,     Math.max(0, (tt.duration_workdays || 1) - 1));
+      db.insert('tasks', {
+        project_id:            proj.id,
+        parent_id:             parent.id,
+        name:                  tt.name,
+        type:                  tt.is_milestone ? 'milestone' : 'task',
+        status:                'todo',
+        progress:              0,
+        rag:                   'green',
+        wbs:                   tt.wbs || null,
+        workstream:            tt.workstream || null,
+        phase:                 phaseName,
+        is_milestone:          !!tt.is_milestone,
+        owner_id:              tt.owner_role       ? (roleMap[tt.owner_role]       || null) : null,
+        accountable_id:        tt.accountable_role ? (roleMap[tt.accountable_role] || null) : null,
+        duration_workdays:     tt.duration_workdays || null,
+        start_offset_workdays: tt.start_offset_workdays || null,
+        start_date:            isoDate(start),
+        end_date:              isoDate(end),
+        key_dependency:        tt.key_dependency || null,
+        acceptance_criteria:   tt.acceptance_criteria || null,
+        sort_order:            sortOrder,
+        created_at:            new Date().toISOString(),
+      });
+      sortOrder += 10;
+    }
+  }
+
+  await openProject(proj.id);
 }
 
 // ── shell ──────────────────────────────────────────────────────────────────
@@ -199,6 +290,36 @@ function renderApp() {
       return;
     }
 
+    if (A.homeView === 'dashboard') {
+      renderDashboard({
+        mount,
+        projectId: null,
+        tasks: db.all('allTasks'),
+        projects: db.all('projects'),
+        risks: db.all('risks'),
+        deliverables: db.all('deliverables'),
+        people: db.all('people'),
+      });
+      const mb = document.getElementById('mainBtn');
+      if (mb) mb.style.display = 'none';
+      return;
+    }
+
+    if (A.homeView === 'templates') {
+      renderTemplates({
+        mount,
+        templates: db.all('templates'),
+        template_tasks: db.all('template_tasks'),
+        projects: db.all('projects'),
+        people: db.all('people'),
+        db,
+        onCreateProject: opts => createProjectFromTemplate(opts),
+      });
+      const mb = document.getElementById('mainBtn');
+      if (mb) mb.style.display = 'none';
+      return;
+    }
+
     // Default: projects grid
     renderProjects({
       mount,
@@ -316,6 +437,54 @@ function renderApp() {
     });
     document.getElementById('addMtgBtn')?.addEventListener('click', createMeeting);
     document.getElementById('mainBtn')?.addEventListener('click', createMeeting);
+    return;
+  }
+
+  // ── GANTT ─────────────────────────────────────────────────────────────────
+  if (A.view === 'gantt') {
+    mount.innerHTML = `<div id="ganttMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
+    renderGantt({
+      mount: document.getElementById('ganttMount'),
+      tasks: projTasks(),
+      people: people(),
+      projectId: A.project,
+      onSelect: id => { A.sel = A.sel === id ? null : id; renderPanel(); },
+    });
+    const mb = document.getElementById('mainBtn');
+    if (mb) mb.style.display = 'none';
+    return;
+  }
+
+  // ── RAID LOG ──────────────────────────────────────────────────────────────
+  if (A.view === 'risks') {
+    mount.innerHTML = `<div id="risksMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
+    renderRisks({
+      mount: document.getElementById('risksMount'),
+      risks: db.all('risks'),
+      people: people(),
+      projectId: A.project,
+      project: db.get('projects', A.project),
+      db,
+      onRerender: () => renderApp(),
+    });
+    const mb = document.getElementById('mainBtn');
+    if (mb) mb.style.display = 'none';
+    return;
+  }
+
+  // ── DASHBOARD ─────────────────────────────────────────────────────────────
+  if (A.view === 'dashboard') {
+    renderDashboard({
+      mount,
+      projectId: A.project,
+      tasks: db.all('tasks'),
+      projects: db.all('projects'),
+      risks: db.all('risks'),
+      deliverables: db.all('deliverables'),
+      people: people(),
+    });
+    const mb = document.getElementById('mainBtn');
+    if (mb) mb.style.display = 'none';
     return;
   }
 
@@ -587,6 +756,12 @@ document.addEventListener('change', e => {
   if (e.target.id==='laneSel') { A.lane=e.target.value; renderApp(); }
 });
 document.addEventListener('keydown', e => { if(e.key==='Escape'){ A.sel=null; renderPanel(); } });
+
+// Cross-view events fired by children:
+// - planr:openProject   → jump into a project (from Portfolio dashboard)
+// - planr:rerender      → re-render current view (from Templates after import/delete)
+window.addEventListener('planr:openProject', e => { openProject(e.detail); });
+window.addEventListener('planr:rerender',    () => { renderApp(); });
 
 // ── shell HTML ─────────────────────────────────────────────────────────────
 const SHELL = `<div class="app">
