@@ -230,8 +230,10 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .contact-role-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;padding:2px 7px;border-radius:10px;font-weight:500;margin-top:6px}
 .contact-badge-int{background:rgba(83,74,183,.09);color:#3C3489}
 .contact-badge-cli{background:rgba(186,117,23,.1);color:#854F0B}
-.contact-remove{margin-left:auto;background:transparent;border:0;color:#C4C9D4;cursor:pointer;padding:4px;border-radius:5px;font-size:14px}
-.contact-remove:hover{color:#E24B4A;background:rgba(226,75,74,.06)}
+.contact-actions{margin-left:auto;display:flex;flex-direction:column;gap:2px;align-items:center}
+.contact-unlink,.contact-delete{background:transparent;border:0;color:#C4C9D4;cursor:pointer;padding:4px 5px;border-radius:5px;font-size:14px;display:inline-flex;align-items:center;justify-content:center}
+.contact-unlink:hover{color:#BA7517;background:rgba(186,117,23,.08)}
+.contact-delete:hover{color:#E24B4A;background:rgba(226,75,74,.06)}
 .contacts-section{margin-bottom:28px}
 .contacts-section-title{font-size:11px;font-weight:600;color:#6B7280;text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;display:flex;align-items:center;gap:8px}
 .contacts-section-count{font-size:10px;background:rgba(0,0,0,.06);color:#6B7280;padding:1px 7px;border-radius:10px}
