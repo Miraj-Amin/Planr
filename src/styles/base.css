@@ -270,3 +270,24 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .foc-proj-head{display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(0,0,0,.02);border-radius:6px;margin-bottom:6px}
 .foc-proj-name{font-size:11.5px;font-weight:500;color:#374151}
 .foc-proj-count{font-size:10px;background:rgba(0,0,0,.05);color:#6B7280;padding:1px 7px;border-radius:10px;font-weight:500;margin-left:auto}
+
+/* ── Task drill-down comments ── */
+.cmt-list{margin-bottom:12px}
+.cmt{padding:10px 0;border-bottom:1px solid rgba(0,0,0,.05)}
+.cmt:last-child{border-bottom:0}
+.cmt-h{display:flex;align-items:center;gap:6px;margin-bottom:5px;font-size:11px}
+.cmt-a{font-weight:500;color:#1A1A22}
+.cmt-t{color:#9CA3AF;font-family:monospace;font-size:10px}
+.cmt-edited{display:inline-flex;align-items:center;gap:2px;font-size:10px;color:#BA7517;cursor:pointer;padding:1px 6px;border-radius:8px;background:rgba(186,117,23,.08)}
+.cmt-edited:hover{background:rgba(186,117,23,.15)}
+.cmt-edit-btn,.cmt-del-btn{background:transparent;border:0;padding:3px;cursor:pointer;color:#C4C9D4;border-radius:4px;display:inline-flex;align-items:center;justify-content:center}
+.cmt-edit-btn:hover{background:rgba(83,74,183,.08);color:#534AB7}
+.cmt-del-btn:hover{background:rgba(226,75,74,.06);color:#E24B4A}
+.cmt-body{font-size:12px;line-height:1.55;color:#374151;padding-left:28px}
+.cmt-hist-wrap{padding-left:28px;margin-top:8px;padding:8px 10px 4px;background:rgba(0,0,0,.02);border-radius:6px;margin-left:28px}
+.cmt-hist-h{font-size:10px;font-weight:600;color:#9CA3AF;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.cmt-hist-item{margin-bottom:8px;padding-bottom:6px;border-bottom:1px dashed rgba(0,0,0,.06)}
+.cmt-hist-item:last-child{border-bottom:0}
+.cmt-hist-t{font-size:10px;color:#9CA3AF;font-family:monospace;margin-bottom:2px}
+.cmt-hist-body{font-size:11.5px;line-height:1.5;color:#6B7280}
+.cmt-add{padding-top:6px}

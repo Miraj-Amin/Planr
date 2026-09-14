@@ -136,6 +136,16 @@ function toolsHTML() {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 const projTasks  = () => db.all('tasks').filter(t => t.project_id === A.project);
+
+// Best-effort: find the people record matching the logged-in auth user (by email).
+// Comments write person IDs, but auth uses a separate user id. If unmatched, returns null;
+// comments will still save with no author.
+function currentUserPersonId() {
+  const email = (window.__currentUserEmail || '').toLowerCase();
+  if (!email) return null;
+  const p = db.all('people').find(x => (x.email || '').toLowerCase() === email);
+  return p?.id || null;
+}
 const projDeps   = () => db.all('dependencies').filter(d => d.project_id === A.project);
 const projStart  = () => { const d=projTasks().map(t=>t.start_date).filter(Boolean).sort(); return d[0]||new Date().toISOString().slice(0,10); };
 const people     = () => db.all('people');
@@ -398,6 +408,71 @@ function renderPanel() {
       <button id="depAdd">Link</button>
     </div>
     ${succs.length?`<div class="psec-h">Successors</div>${succs.map(x=>`<div class="dep-item"><span class="dep-kind">${x.dep.type}</span>${x.task.name}</div>`).join('')}`:''}
+
+    <!-- Comments section -->
+    ${(() => {
+      const allComments = db.all('task_comments') || [];
+      const comments = allComments
+        .filter(c => c.task_id === t.id && !c.deleted_at)
+        .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+      const historyByComment = new Map();
+      (db.all('task_comment_history') || []).forEach(h => {
+        if (!historyByComment.has(h.comment_id)) historyByComment.set(h.comment_id, []);
+        historyByComment.get(h.comment_id).push(h);
+      });
+
+      const fmtTime = iso => {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+      };
+
+      return `
+        <div class="psec-h" style="margin-top:20px">Comments <span style="font-weight:400;color:#9CA3AF">${comments.length}</span></div>
+        <div class="cmt-list">
+          ${comments.length === 0
+            ? '<div style="font-size:11px;color:#9CA3AF;padding:4px 0 8px;font-style:italic">No comments yet.</div>'
+            : comments.map(c => {
+                const author = ppl.find(p => p.id === c.author_id);
+                const hist = historyByComment.get(c.id) || [];
+                const wasEdited = c.updated_at && c.created_at && c.updated_at !== c.created_at;
+                return `<div class="cmt" data-comment="${c.id}">
+                  <div class="cmt-h">
+                    ${author ? `<div class="av" style="width:22px;height:22px;font-size:9px;background:${author.color}">${author.initials}</div>` : '<div class="av" style="width:22px;height:22px;font-size:9px;background:#C4C9D4">?</div>'}
+                    <span class="cmt-a">${author?.name || 'Unknown'}</span>
+                    <span class="cmt-t">${fmtTime(c.created_at)}</span>
+                    ${wasEdited ? `<span class="cmt-edited" data-comment="${c.id}" title="Edited ${fmtTime(c.updated_at)} — click to view history"><i class="ti ti-pencil" style="font-size:9px"></i>edited</span>` : ''}
+                    <span style="flex:1"></span>
+                    <button class="cmt-edit-btn" data-comment="${c.id}" title="Edit">
+                      <i class="ti ti-pencil" style="font-size:11px"></i>
+                    </button>
+                    <button class="cmt-del-btn" data-comment="${c.id}" title="Delete">
+                      <i class="ti ti-trash" style="font-size:11px"></i>
+                    </button>
+                  </div>
+                  <div class="cmt-body" data-comment="${c.id}">${(c.body || '').replace(/</g, '&lt;').replace(/\n/g, '<br>')}</div>
+                  ${hist.length ? `<div class="cmt-hist-wrap" data-comment="${c.id}" style="display:none">
+                    <div class="cmt-hist-h">Edit history (${hist.length})</div>
+                    ${hist.sort((a,b)=>(b.edited_at||'').localeCompare(a.edited_at||'')).map(h => `
+                      <div class="cmt-hist-item">
+                        <div class="cmt-hist-t">${fmtTime(h.edited_at)}</div>
+                        <div class="cmt-hist-body">${(h.body || '').replace(/</g, '&lt;').replace(/\n/g, '<br>')}</div>
+                      </div>
+                    `).join('')}
+                  </div>` : ''}
+                </div>`;
+              }).join('')}
+        </div>
+        <div class="cmt-add">
+          <textarea id="cmtNew" placeholder="Add a comment…" rows="2"
+            style="width:100%;box-sizing:border-box;border:.5px solid rgba(0,0,0,.15);border-radius:6px;padding:8px 10px;font-size:12px;font-family:inherit;resize:vertical;min-height:52px;outline:none"></textarea>
+          <div style="display:flex;justify-content:flex-end;margin-top:6px">
+            <button id="cmtSubmit" class="btn" style="height:28px;padding:0 12px;font-size:11px">Post comment</button>
+          </div>
+        </div>
+      `;
+    })()}
+
     <div style="padding-top:14px;border-top:1px solid rgba(0,0,0,.06);margin-top:14px">
       <button id="delTask" style="font-size:11px;color:#9CA3AF;background:none;border:none;cursor:pointer;display:flex;align-items:center;gap:5px">
         <i class="ti ti-trash" style="font-size:13px"></i>Delete task</button>
@@ -405,6 +480,74 @@ function renderPanel() {
   </div>`;
 
   const on = (id, ev, fn) => { const n=document.getElementById(id); if(n)n.addEventListener(ev,fn); };
+
+  // ── Comment handlers ────────────────────────────────────────────────
+  on('cmtSubmit', 'click', () => {
+    const ta = document.getElementById('cmtNew');
+    const body = (ta.value || '').trim();
+    if (!body) return;
+    db.insert('task_comments', {
+      task_id: t.id,
+      author_id: currentUserPersonId(),
+      body,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      deleted_at: null,
+    });
+    renderPanel();
+  });
+  document.querySelectorAll('.cmt-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cid = btn.dataset.comment;
+      const comment = (db.all('task_comments') || []).find(c => c.id === cid);
+      if (!comment) return;
+      const bodyEl = document.querySelector(`.cmt-body[data-comment="${cid}"]`);
+      // Replace the body with an inline editor
+      bodyEl.innerHTML = `
+        <textarea class="cmt-edit-ta" style="width:100%;box-sizing:border-box;border:.5px solid rgba(0,0,0,.15);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;resize:vertical;min-height:52px;outline:none"></textarea>
+        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:4px">
+          <button class="cmt-edit-cancel" style="background:transparent;border:0;color:#9CA3AF;font-size:11px;cursor:pointer;padding:3px 8px">Cancel</button>
+          <button class="cmt-edit-save" style="background:#534AB7;border:0;color:#fff;font-size:11px;cursor:pointer;padding:3px 10px;border-radius:5px;font-weight:500">Save</button>
+        </div>`;
+      const ta = bodyEl.querySelector('.cmt-edit-ta');
+      ta.value = comment.body || '';
+      ta.focus();
+      bodyEl.querySelector('.cmt-edit-cancel').addEventListener('click', () => renderPanel());
+      bodyEl.querySelector('.cmt-edit-save').addEventListener('click', () => {
+        const newBody = (ta.value || '').trim();
+        if (!newBody || newBody === comment.body) { renderPanel(); return; }
+        // Insert history record for the PRIOR body first (mirrors what the DB trigger does),
+        // then update the comment.
+        db.insert('task_comment_history', {
+          comment_id: comment.id,
+          body: comment.body,
+          edited_at: new Date().toISOString(),
+          edited_by: currentUserPersonId(),
+        });
+        db.update('task_comments', comment.id, {
+          body: newBody,
+          updated_at: new Date().toISOString(),
+        });
+        renderPanel();
+      });
+    });
+  });
+  document.querySelectorAll('.cmt-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const cid = btn.dataset.comment;
+      if (!confirm('Delete this comment?')) return;
+      db.update('task_comments', cid, { deleted_at: new Date().toISOString() });
+      renderPanel();
+    });
+  });
+  document.querySelectorAll('.cmt-edited').forEach(el => {
+    el.addEventListener('click', () => {
+      const cid = el.dataset.comment;
+      const wrap = document.querySelector(`.cmt-hist-wrap[data-comment="${cid}"]`);
+      if (!wrap) return;
+      wrap.style.display = wrap.style.display === 'none' ? 'block' : 'none';
+    });
+  });
   on('pX',      'click', () => { A.sel=null; renderPanel(); });
   on('fType',   'change', e => { db.update('tasks',t.id,{type:e.target.value}); renderPanel(); });
   on('fStatus', 'change', e => { db.update('tasks',t.id,{status:e.target.value,progress:e.target.value==='done'?100:t.progress}); renderPanel(); });
@@ -471,6 +614,7 @@ async function boot() {
   if (!session) {
     showAuth(supabase, async user => {
       currentUserId = user?.id || null;
+      window.__currentUserEmail = user?.email || null;
       document.body.innerHTML = SHELL;
       showLoading('Loading projects…');
       await db.loadOverview();
@@ -480,6 +624,7 @@ async function boot() {
   }
 
   currentUserId = session.user.id;
+  window.__currentUserEmail = session.user.email;
   showLoading('Loading projects…');
   await db.loadOverview();
   renderApp();

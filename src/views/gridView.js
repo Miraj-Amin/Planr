@@ -54,7 +54,22 @@ function cellHTML(colId, task, ctx, hasChildren, isCollapsed) {
       const dragHandle = `<span class="g-drag" data-id="${task.id}" draggable="true"
         style="opacity:0;cursor:grab;color:#C4C9D4;font-size:14px;margin-right:4px;user-select:none;
                width:14px;flex-shrink:0;transition:opacity 100ms;line-height:1">⋮⋮</span>`;
-      return `${chevron}${dragHandle}<input type="text" class="g-in" data-id="${task.id}" data-col="name"
+      const openBtn = `<button class="g-open" data-id="${task.id}" title="Open task details"
+        style="opacity:0;background:transparent;border:0;padding:0;cursor:pointer;color:#9CA3AF;
+               font-size:12px;margin-right:4px;user-select:none;width:16px;height:16px;
+               display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;
+               transition:opacity 100ms;border-radius:3px" onmouseover="this.style.background='rgba(83,74,183,.1)';this.style.color='#534AB7'" onmouseout="this.style.background='transparent';this.style.color='#9CA3AF'">
+        <i class="ti ti-arrow-up-right" style="font-size:11px"></i>
+      </button>`;
+      // In wrap mode use a textarea that auto-grows so long names wrap onto multiple lines.
+      // In non-wrap mode keep the classic single-line input for max density.
+      if (ctx.wrap) {
+        return `${chevron}${dragHandle}${openBtn}<textarea class="g-in g-name-ta" data-id="${task.id}" data-col="name"
+          placeholder="Untitled task" rows="1"
+          style="${baseStyle};${bold};cursor:text;resize:none;padding:2px 0;line-height:1.4;
+                 min-height:22px;overflow:hidden;white-space:pre-wrap;word-wrap:break-word">${(task.name||'').replace(/</g,'&lt;')}</textarea>`;
+      }
+      return `${chevron}${dragHandle}${openBtn}<input type="text" class="g-in" data-id="${task.id}" data-col="name"
         value="${(task.name||'').replace(/"/g,'&quot;')}" placeholder="Untitled task"
         style="${baseStyle};${bold};cursor:text">`;
     }
@@ -121,11 +136,14 @@ function rowHTML(task, indent, cols, widths, ctx, hasChildren, isCollapsed, isSe
     const ipl = colId === 'name' ? 14 + indent*20 : 8;
     const stripEl = colId==='name'
       ? `<span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:${strip}"></span>` : '';
+    // Wrap mode: allow the row to grow and long text to break onto multiple lines
+    const cellH = ctx.wrap ? 'min-height:38px' : 'height:38px';
+    const innerOverflow = ctx.wrap ? '' : 'overflow:hidden';
     return `<td class="g-cell" data-id="${task.id}" data-col="${colId}"
-      style="position:relative;height:38px;padding:0;border-bottom:1px solid rgba(0,0,0,.06);
-             border-right:1px solid rgba(0,0,0,.04);width:${w}px;min-width:${w}px;max-width:${w}px;overflow:hidden;background:${bg}">
+      style="position:relative;${cellH};padding:0;border-bottom:1px solid rgba(0,0,0,.06);
+             border-right:1px solid rgba(0,0,0,.04);width:${w}px;min-width:${w}px;max-width:${w}px;overflow:hidden;background:${bg};vertical-align:top">
       ${stripEl}
-      <div class="g-inner" style="display:flex;align-items:center;padding:0 8px 0 ${ipl}px;height:100%;overflow:hidden;gap:2px">
+      <div class="g-inner" style="display:flex;align-items:${ctx.wrap?'flex-start':'center'};padding:${ctx.wrap?'8px':'0'} 8px 0 ${ipl}px;${ctx.wrap?'':'height:100%;'}${innerOverflow};gap:2px;${ctx.wrap?'min-height:38px':''}">
         ${cellHTML(colId, task, ctx, hasChildren, isCollapsed)}
       </div>
     </td>`;
@@ -354,9 +372,46 @@ function moveTaskInside(taskId, targetId, db, allTasks, onRerender) {
 }
 
 // ─── state that persists across rerenders ───────────────────────────────────
+// Column preferences (order, widths, hidden set, wrap) persist to localStorage so
+// they survive reloads. Everything else resets each session.
+const GRID_PREFS_KEY = 'planr_grid_prefs_v1';
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(GRID_PREFS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    // Sanity: ensure every stored col is still in ALL_COLS; drop unknowns
+    const known = new Set(ALL_COLS.map(c => c.id));
+    p.cols   = (p.cols || []).filter(c => known.has(c));
+    // Append any newly-added columns that weren't in the saved set
+    ALL_COLS.forEach(c => { if (!p.cols.includes(c.id) && !(p.hidden || []).includes(c.id)) p.cols.push(c.id); });
+    p.widths = p.widths || {};
+    ALL_COLS.forEach(c => { if (!p.widths[c.id]) p.widths[c.id] = c.w; });
+    p.hidden = new Set(p.hidden || []);
+    p.wrap   = !!p.wrap;
+    return p;
+  } catch (e) { return null; }
+}
+
+function savePrefs() {
+  try {
+    localStorage.setItem(GRID_PREFS_KEY, JSON.stringify({
+      cols: G.cols,
+      widths: G.widths,
+      hidden: [...G.hidden],
+      wrap: G.wrap,
+    }));
+  } catch (e) { /* no-op if quota / disabled */ }
+}
+
+const _persisted = loadPrefs();
+
 let G = {
-  cols:      ALL_COLS.map(c => c.id),
-  widths:    Object.fromEntries(ALL_COLS.map(c => [c.id, c.w])),
+  cols:      _persisted?.cols   || ALL_COLS.map(c => c.id),
+  widths:    _persisted?.widths || Object.fromEntries(ALL_COLS.map(c => [c.id, c.w])),
+  hidden:    _persisted?.hidden || new Set(),  // column ids currently hidden
+  wrap:      _persisted?.wrap   ?? false,       // wrap long text vs ellipsize
   collapsed: new Set(),   // task ids whose children are hidden
   selected:  new Set(),   // task ids currently selected for bulk ops
   lastClickedId: null,    // for shift+click range selection
@@ -414,9 +469,9 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
       groups.get(key).rows.push(...collectRows(t.id, 0));
     });
 
-  const cols = G.cols;
+  const cols = G.cols.filter(c => !G.hidden.has(c));
   const colspan = cols.length + 2;  // +1 for checkbox, +1 for the trailing filler col
-  const ctx = { people, sprints };
+  const ctx = { people, sprints, wrap: G.wrap };
 
   const anySelected = G.selected.size > 0;
   const allVisibleSelected = tasks.length > 0 && tasks.every(t => G.selected.has(t.id));
@@ -428,13 +483,19 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
 
   const ths = cols.map(colId => {
     const col = ALL_COLS.find(c => c.id === colId) || { label: colId };
-    return `<th data-col="${colId}"
+    return `<th data-col="${colId}" draggable="true" class="g-th"
       style="position:sticky;top:0;z-index:2;background:#F0F1F4;text-align:left;
              border-bottom:1px solid rgba(0,0,0,.1);border-right:1px solid rgba(0,0,0,.06);
              padding:0 10px;height:32px;font-size:10px;font-weight:600;color:#9CA3AF;
              text-transform:uppercase;letter-spacing:.05em;width:${G.widths[colId]}px;
-             min-width:${G.widths[colId]}px;white-space:nowrap;user-select:none">
-      ${col.label}
+             min-width:${G.widths[colId]}px;white-space:nowrap;user-select:none;
+             cursor:grab;position:sticky">
+      <span style="pointer-events:none">${col.label}</span>
+      <div class="g-th-resize" data-col="${colId}"
+        style="position:absolute;top:0;right:0;width:6px;height:100%;cursor:col-resize;
+               background:transparent;z-index:3"
+        onmouseover="this.style.background='rgba(83,74,183,.2)'"
+        onmouseout="this.style.background='transparent'"></div>
     </th>`;
   }).join('');
 
@@ -462,7 +523,13 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
           <i class="ti ti-chevrons-down" style="font-size:12px"></i>Expand all</button>
         <button class="g-tool" id="gCollapseAll" style="border:0;background:transparent;font-size:11px;color:#6B7280;cursor:pointer;display:flex;align-items:center;gap:4px;padding:3px 6px;border-radius:5px">
           <i class="ti ti-chevrons-up" style="font-size:12px"></i>Collapse all</button>
+        <span style="flex:1"></span>
+        <button class="g-tool" id="gWrapToggle" style="border:0;background:${G.wrap?'rgba(83,74,183,.1)':'transparent'};font-size:11px;color:${G.wrap?'#534AB7':'#6B7280'};cursor:pointer;display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px">
+          <i class="ti ti-text-wrap" style="font-size:12px"></i>${G.wrap?'Wrap on':'Wrap off'}</button>
+        <button class="g-tool" id="gColsBtn" style="border:0;background:transparent;font-size:11px;color:#6B7280;cursor:pointer;display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px">
+          <i class="ti ti-columns" style="font-size:12px"></i>Columns</button>
       </div>
+      <div id="gColsMenu" style="display:none;position:absolute;top:44px;right:14px;background:#fff;border:.5px solid rgba(0,0,0,.12);border-radius:9px;box-shadow:0 4px 20px rgba(0,0,0,.14);z-index:210;min-width:220px;padding:8px 0"></div>
       <table id="gTable" style="width:100%;border-collapse:collapse;table-layout:fixed">
         <colgroup><col style="width:36px">${cols.map(c => `<col style="width:${G.widths[c]}px">`).join('')}<col></colgroup>
         <thead><tr>${checkTh}${ths}<th style="background:#F0F1F4;border-bottom:1px solid rgba(0,0,0,.1)"></th></tr></thead>
@@ -603,6 +670,151 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     onRerender();
   });
 
+  // ─── wrap toggle ─────────────────────────────────────────────────────
+  mount.querySelector('#gWrapToggle').addEventListener('click', () => {
+    G.wrap = !G.wrap;
+    savePrefs();
+    onRerender();
+  });
+
+  // ─── columns menu (show/hide) ────────────────────────────────────────
+  const colsBtn  = mount.querySelector('#gColsBtn');
+  const colsMenu = mount.querySelector('#gColsMenu');
+  function renderColsMenu() {
+    colsMenu.innerHTML = `
+      <div style="padding:6px 12px 8px;border-bottom:.5px solid rgba(0,0,0,.06);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#9CA3AF">Show columns</div>
+      ${ALL_COLS.map(c => {
+        const visible = !G.hidden.has(c.id);
+        return `<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:12px;color:#374151" onmouseover="this.style.background='rgba(83,74,183,.05)'" onmouseout="this.style.background='transparent'">
+          <input type="checkbox" class="col-tgl" data-col="${c.id}" ${visible?'checked':''}
+                 style="cursor:pointer;margin:0;accent-color:#534AB7">
+          <span style="flex:1">${c.label}</span>
+        </label>`;
+      }).join('')}
+      <div style="border-top:.5px solid rgba(0,0,0,.06);padding:6px 4px 4px">
+        <button id="colsReset" style="width:100%;text-align:left;background:transparent;border:0;padding:6px 8px;font-size:11px;color:#6B7280;cursor:pointer;border-radius:5px" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'">Reset column order & widths</button>
+      </div>
+    `;
+    colsMenu.querySelectorAll('.col-tgl').forEach(cb => {
+      cb.addEventListener('change', () => {
+        const id = cb.dataset.col;
+        if (cb.checked) G.hidden.delete(id);
+        else G.hidden.add(id);
+        savePrefs();
+        onRerender();
+      });
+    });
+    colsMenu.querySelector('#colsReset').addEventListener('click', () => {
+      G.cols   = ALL_COLS.map(c => c.id);
+      G.widths = Object.fromEntries(ALL_COLS.map(c => [c.id, c.w]));
+      G.hidden = new Set();
+      savePrefs();
+      onRerender();
+    });
+  }
+  colsBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    if (colsMenu.style.display === 'block') { colsMenu.style.display = 'none'; return; }
+    renderColsMenu();
+    colsMenu.style.display = 'block';
+  });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('#gColsMenu') && !e.target.closest('#gColsBtn')) {
+      colsMenu.style.display = 'none';
+    }
+  });
+
+  // ─── auto-resize name textareas in wrap mode ─────────────────────────
+  if (G.wrap) {
+    const autoresize = ta => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+    mount.querySelectorAll('.g-name-ta').forEach(ta => {
+      autoresize(ta);
+      ta.addEventListener('input', () => autoresize(ta));
+    });
+  }
+
+  // ─── column resize (drag right edge of header) ─────────────────────
+  mount.querySelectorAll('.g-th-resize').forEach(grip => {
+    grip.addEventListener('mousedown', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      const colId = grip.dataset.col;
+      const startX = e.clientX;
+      const startW = G.widths[colId] || 120;
+      const onMove = ev => {
+        const nw = Math.max(50, startW + (ev.clientX - startX));
+        G.widths[colId] = nw;
+        // Live update without full rerender
+        mount.querySelectorAll(`th[data-col="${colId}"]`).forEach(th => {
+          th.style.width = nw + 'px';
+          th.style.minWidth = nw + 'px';
+        });
+        mount.querySelectorAll(`td[data-col="${colId}"]`).forEach(td => {
+          td.style.width = nw + 'px';
+          td.style.minWidth = nw + 'px';
+          td.style.maxWidth = nw + 'px';
+        });
+        const cgIdx = G.cols.filter(c => !G.hidden.has(c)).indexOf(colId);
+        if (cgIdx >= 0) {
+          const cg = mount.querySelector('#gTable > colgroup');
+          if (cg && cg.children[cgIdx + 1]) cg.children[cgIdx + 1].style.width = nw + 'px';
+        }
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        savePrefs();
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+
+  // ─── column drag-reorder ─────────────────────────────────────────────
+  let dragColId = null;
+  mount.querySelectorAll('.g-th').forEach(th => {
+    th.addEventListener('dragstart', e => {
+      // Ignore if starting on the resize grip
+      if (e.target.classList?.contains('g-th-resize')) { e.preventDefault(); return; }
+      dragColId = th.dataset.col;
+      e.dataTransfer.effectAllowed = 'move';
+      // Firefox needs some data
+      try { e.dataTransfer.setData('text/plain', dragColId); } catch (_) {}
+      th.style.opacity = '0.5';
+    });
+    th.addEventListener('dragend', () => {
+      th.style.opacity = '';
+      mount.querySelectorAll('.g-th').forEach(t => t.style.borderLeft = '');
+      dragColId = null;
+    });
+    th.addEventListener('dragover', e => {
+      if (!dragColId || dragColId === th.dataset.col) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      th.style.borderLeft = '2px solid #534AB7';
+    });
+    th.addEventListener('dragleave', () => {
+      th.style.borderLeft = '';
+    });
+    th.addEventListener('drop', e => {
+      e.preventDefault();
+      const targetColId = th.dataset.col;
+      if (!dragColId || dragColId === targetColId) return;
+      // Reorder G.cols: remove dragColId, insert before targetColId
+      const arr = [...G.cols];
+      const from = arr.indexOf(dragColId);
+      let to = arr.indexOf(targetColId);
+      if (from < 0 || to < 0) return;
+      arr.splice(from, 1);
+      // Adjust target index if we removed something before it
+      if (from < to) to--;
+      arr.splice(to, 0, dragColId);
+      G.cols = arr;
+      savePrefs();
+      onRerender();
+    });
+  });
+
   // ─── chevron toggle ────────────────────────────────────────────────────
   table.addEventListener('click', e => {
     const chev = e.target.closest('.g-chev');
@@ -716,6 +928,8 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     const el = e.target.closest('.g-in');
     if (!el || el.dataset.col !== 'name') return;
     if (e.key === 'Enter') {
+      // In wrap mode: Shift+Enter inserts a newline; plain Enter still creates a new row.
+      if (G.wrap && e.shiftKey) return;   // let the textarea handle it
       e.preventDefault();
       const taskId = el.dataset.id;
       const task = db.get('tasks', taskId);
@@ -743,14 +957,22 @@ export function renderGrid({ mount, tasks, people, deliverables, sprints, db, pr
     }
   });
 
-  // ─── hover drag handle ─────────────────────────────────────────────────
+  // ─── hover drag handle & open button ──────────────────────────────────
   table.addEventListener('mouseover', e => {
     const row = e.target.closest('.g-row');
-    if (row) row.querySelectorAll('.g-drag').forEach(h => h.style.opacity = '1');
+    if (row) row.querySelectorAll('.g-drag, .g-open').forEach(h => h.style.opacity = '1');
   });
   table.addEventListener('mouseout', e => {
     const row = e.target.closest('.g-row');
-    if (row && !row.matches(':hover')) row.querySelectorAll('.g-drag').forEach(h => h.style.opacity = '0');
+    if (row && !row.matches(':hover')) row.querySelectorAll('.g-drag, .g-open').forEach(h => h.style.opacity = '0');
+  });
+
+  // Open task drill-down when the open button is clicked
+  table.addEventListener('click', e => {
+    const btn = e.target.closest('.g-open');
+    if (!btn) return;
+    e.stopPropagation();
+    onSelect?.(btn.dataset.id);
   });
 
   // ─── DRAG AND DROP ─────────────────────────────────────────────────────

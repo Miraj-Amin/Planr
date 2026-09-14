@@ -60,14 +60,22 @@ export class SupabaseAdapter {
     const taskIds    = (tasks.data || []).map(t => t.id);
     const meetingIds = (meetings.data || []).map(m => m.id);
 
-    const [mitems, milinks] = await Promise.all([
+    const [mitems, milinks, tcomments] = await Promise.all([
       taskIds.length
         ? this.sb.from('meeting_items').select('*').in('task_id', taskIds)
         : Promise.resolve({ data: [] }),
       meetingIds.length
         ? this.sb.from('meeting_item_links').select('*').in('meeting_id', meetingIds)
         : Promise.resolve({ data: [] }),
+      taskIds.length
+        ? this.sb.from('task_comments').select('*').in('task_id', taskIds)
+        : Promise.resolve({ data: [] }),
     ]);
+
+    const commentIds = (tcomments.data || []).map(c => c.id);
+    const thist = commentIds.length
+      ? await this.sb.from('task_comment_history').select('*').in('comment_id', commentIds)
+      : { data: [] };
 
     this._cache = {
       projects:           projects.data      || [],
@@ -82,9 +90,11 @@ export class SupabaseAdapter {
       meeting_item_links: milinks.data       || [],
       project_members:    [],
       project_contacts:   projectContacts.data || [],
+      task_comments:      tcomments.data     || [],
+      task_comment_history: thist.data       || [],
     };
 
-    const errs = [people,projects,deliverables,sprints,tasks,deps,meetings,mitems,milinks]
+    const errs = [people,projects,deliverables,sprints,tasks,deps,meetings,mitems,milinks,tcomments,thist]
       .map(r=>r.error).filter(Boolean);
     if (errs.length) console.error('Project load errors:', errs);
   }
