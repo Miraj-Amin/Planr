@@ -263,3 +263,10 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .foc-proj{font-size:10.5px;color:#9CA3AF;background:rgba(0,0,0,.03);padding:2px 7px;border-radius:10px;font-weight:500;white-space:nowrap;flex-shrink:0;max-width:180px;overflow:hidden;text-overflow:ellipsis}
 .foc-meta{display:flex;align-items:center;gap:10px;padding-left:30px}
 .foc-meta .stat{font-size:10px;padding:1px 8px;border-radius:10px;font-weight:500}
+
+/* ── Focus: project sub-groups (global mode) ── */
+.foc-proj-group{margin-bottom:14px}
+.foc-proj-group:last-child{margin-bottom:0}
+.foc-proj-head{display:flex;align-items:center;gap:8px;padding:6px 10px;background:rgba(0,0,0,.02);border-radius:6px;margin-bottom:6px}
+.foc-proj-name{font-size:11.5px;font-weight:500;color:#374151}
+.foc-proj-count{font-size:10px;background:rgba(0,0,0,.05);color:#6B7280;padding:1px 7px;border-radius:10px;font-weight:500;margin-left:auto}

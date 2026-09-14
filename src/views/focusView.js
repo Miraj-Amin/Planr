@@ -96,17 +96,24 @@ function rowHTML(t, people, projects, taskById, isFirst, isLast) {
   </div>`;
 }
 
-export function renderFocus({ mount, tasks, people, projects, db, onSelect, onRerender }) {
+export function renderFocus({ mount, tasks, people, projects, db, onSelect, onRerender, global = false }) {
   const today = new Date();
   const taskById = new Map(tasks.map(t => [t.id, t]));
 
+  // When in global mode, only include tasks from active projects
+  const workingTasks = global
+    ? tasks.filter(t => {
+        const proj = projects.find(p => p.id === t.project_id);
+        return proj && proj.status === 'active';
+      })
+    : tasks;
+
   // Build set of parents (tasks that have children) so we can filter to leaves only
   const parentIds = new Set();
-  tasks.forEach(t => { if (t.parent_id) parentIds.add(t.parent_id); });
+  workingTasks.forEach(t => { if (t.parent_id) parentIds.add(t.parent_id); });
 
   // Filter: leaves only, exclude done, exclude phases and meeting/agenda/followup shells
-  // (Agenda and follow-up items become tasks in the plan, so if they're leaves they show)
-  const candidates = tasks.filter(t =>
+  const candidates = workingTasks.filter(t =>
     !parentIds.has(t.id) &&           // no children = leaf
     t.status !== 'done' &&
     t.type !== 'phase' &&
@@ -141,21 +148,58 @@ export function renderFocus({ mount, tasks, people, projects, db, onSelect, onRe
   const groupHTML = ({ id, label, accent }) => {
     const items = buckets[id];
     if (!items.length) return '';
-    const rows = items.map((t, i) => rowHTML(t, people, projects, taskById, i === 0, i === items.length - 1)).join('');
+
+    let bodyHTML = '';
+
+    if (global) {
+      // Sub-group by project inside each time bucket
+      const byProject = new Map();
+      items.forEach(t => {
+        if (!byProject.has(t.project_id)) byProject.set(t.project_id, []);
+        byProject.get(t.project_id).push(t);
+      });
+
+      // Order projects alphabetically by name
+      const orderedProjects = [...byProject.keys()]
+        .map(pid => projects.find(p => p.id === pid))
+        .filter(Boolean)
+        .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+      bodyHTML = orderedProjects.map(proj => {
+        const list = byProject.get(proj.id);
+        const rows = list.map((t, i) =>
+          rowHTML(t, people, projects, taskById, i === 0, i === list.length - 1)
+        ).join('');
+        return `<div class="foc-proj-group">
+          <div class="foc-proj-head">
+            <i class="ti ti-folder" style="font-size:12px;color:#9CA3AF"></i>
+            <span class="foc-proj-name">${proj.name}</span>
+            <span class="foc-proj-count">${list.length}</span>
+          </div>
+          <div class="foc-group-rows" data-group="${id}" data-project="${proj.id}">${rows}</div>
+        </div>`;
+      }).join('');
+    } else {
+      const rows = items.map((t, i) =>
+        rowHTML(t, people, projects, taskById, i === 0, i === items.length - 1)
+      ).join('');
+      bodyHTML = `<div class="foc-group-rows" data-group="${id}">${rows}</div>`;
+    }
+
     return `<div class="foc-group">
       <div class="foc-group-head">
         <span class="foc-group-dot" style="background:${accent}"></span>
         <span class="foc-group-name">${label}</span>
         <span class="foc-group-count">${items.length}</span>
       </div>
-      <div class="foc-group-rows" data-group="${id}">${rows}</div>
+      ${bodyHTML}
     </div>`;
   };
 
   mount.innerHTML = `
     <div class="foc-banner">
       <i class="ti ti-target" style="color:#7F77DD;font-size:14px"></i>
-      <span><b>${total} item${total === 1 ? '' : 's'}</b> in focus.</span>
+      <span><b>${total} item${total === 1 ? '' : 's'}</b> in focus${global ? ' across all active projects' : ''}.</span>
       <span style="margin-left:auto;color:#9CA3AF">Ordering here doesn't change your Plan.</span>
     </div>
     <div class="foc-scroll">
@@ -170,16 +214,28 @@ export function renderFocus({ mount, tasks, people, projects, db, onSelect, onRe
     for (const [groupId, list] of Object.entries(buckets)) {
       const idx = list.findIndex(t => t.id === taskId);
       if (idx === -1) continue;
-      const newIdx = direction === 'up' ? idx - 1 : idx + 1;
-      if (newIdx < 0 || newIdx >= list.length) return;
+
+      // In global mode, reordering only happens WITHIN a project's sub-group.
+      // Find the project's sublist and reorder inside it.
+      let scopedList;
+      if (global) {
+        const task = list[idx];
+        scopedList = list.filter(t => t.project_id === task.project_id);
+      } else {
+        scopedList = list;
+      }
+
+      const scopedIdx = scopedList.findIndex(t => t.id === taskId);
+      const newIdx = direction === 'up' ? scopedIdx - 1 : scopedIdx + 1;
+      if (newIdx < 0 || newIdx >= scopedList.length) return;
 
       // Swap them
-      const [a, b] = [list[idx], list[newIdx]];
-      const reordered = [...list];
-      reordered[idx] = b;
+      const [a, b] = [scopedList[scopedIdx], scopedList[newIdx]];
+      const reordered = [...scopedList];
+      reordered[scopedIdx] = b;
       reordered[newIdx] = a;
 
-      // Renumber focus_order for the whole bucket from 0 so gaps close cleanly
+      // Renumber focus_order for the scoped list from 0 so gaps close cleanly
       reordered.forEach((t, i) => {
         db.update('tasks', t.id, { focus_order: i });
       });

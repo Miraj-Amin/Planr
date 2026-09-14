@@ -21,9 +21,17 @@ const VIEWS = [
   { id:'contacts', icon:'ti-users',         label:'Contacts' },
 ];
 
+// Home-level (all projects) views — shown when no project is selected
+const HOME_VIEWS = [
+  { id:'projects', icon:'ti-layout-grid',   label:'Projects' },
+  { id:'focus',    icon:'ti-sun',           label:'Focus' },
+  { id:'board',    icon:'ti-layout-kanban', label:'Board' },
+];
+
 let A = {
   view:'plan', project:null, sel:null, meeting:null,
   horizon:7, lane:'none', hideAgenda:false,
+  homeView:'projects',
 };
 
 // ── loading ────────────────────────────────────────────────────────────────
@@ -80,9 +88,10 @@ function renderShell(isHome) {
 
   document.getElementById('projLabel').innerHTML = topLeft;
 
-  // Tabs (only when inside a project)
-  document.getElementById('tabset').innerHTML = isHome ? '' : VIEWS.map(v =>
-    `<div class="tab ${A.view===v.id?'on':''}" data-view="${v.id}">${v.label}</div>`).join('');
+  // Tabs — home shows HOME_VIEWS, in-project shows VIEWS
+  document.getElementById('tabset').innerHTML = isHome
+    ? HOME_VIEWS.map(v => `<div class="tab ${A.homeView===v.id?'on':''}" data-home-view="${v.id}">${v.label}</div>`).join('')
+    : VIEWS.map(v => `<div class="tab ${A.view===v.id?'on':''}" data-view="${v.id}">${v.label}</div>`).join('');
 
   // Tools bar
   document.getElementById('tools').innerHTML = isHome ? '' : toolsHTML();
@@ -139,6 +148,48 @@ function renderApp() {
   const mount = document.getElementById('view');
 
   if (isHome) {
+    if (A.homeView === 'focus') {
+      mount.innerHTML = `<div id="focusMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
+      renderFocus({
+        mount: document.getElementById('focusMount'),
+        tasks: db.all('allTasks'),
+        people: db.all('people'),
+        projects: db.all('projects'),
+        db,
+        global: true,
+        onSelect: () => {},   // no side-panel at home level for now
+        onRerender: () => renderApp(),
+      });
+      const mb = document.getElementById('mainBtn');
+      if (mb) mb.style.display = 'none';
+      return;
+    }
+
+    if (A.homeView === 'board') {
+      mount.innerHTML = `<div id="boardMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
+      renderBoard({
+        mount: document.getElementById('boardMount'),
+        tasks: db.all('allTasks'),
+        people: db.all('people'),
+        deliverables: db.all('deliverables'),
+        sprints: db.all('sprints'),
+        projects: db.all('projects'),
+        selId: null,
+        lane: A.lane === 'none' ? 'project' : A.lane,  // group by project by default in global mode
+        hideAgenda: A.hideAgenda,
+        global: true,
+        onSelect: () => {},
+        onStatusChange: (taskId, newStatus) => {
+          db.update('tasks', taskId, { status: newStatus });
+          renderApp();
+        },
+      });
+      const mb = document.getElementById('mainBtn');
+      if (mb) mb.style.display = 'none';
+      return;
+    }
+
+    // Default: projects grid
     renderProjects({
       mount,
       projects:     db.all('projects'),
@@ -147,7 +198,6 @@ function renderApp() {
       deliverables: db.all('deliverables'),
       onSelect: projId => openProject(projId),
       onCreate: () => newProjectForm(db, supabase, currentUserId, proj => {
-        // update overview cache immediately
         db._cache.projects = db._cache.projects || [];
         if (!db._cache.projects.find(p=>p.id===proj.id)) db._cache.projects.push(proj);
         openProject(proj.id);
@@ -385,6 +435,8 @@ function renderPanel() {
 document.addEventListener('click', e => {
   const v = e.target.closest('[data-view]');
   if (v) { A.view=v.dataset.view; A.sel=null; renderApp(); return; }
+  const hv = e.target.closest('[data-home-view]');
+  if (hv) { A.homeView=hv.dataset.homeView; A.sel=null; renderApp(); return; }
   const hz = e.target.closest('[data-hz]');
   if (hz) { A.horizon=+hz.dataset.hz; renderApp(); return; }
 });

@@ -74,11 +74,20 @@ function colHTML(st,ts,people,selId,deliverables){
 
 let dragId=null;
 
-export function renderBoard({mount,tasks,people,deliverables,sprints,selId,lane,hideAgenda,onSelect,onStatusChange}){
-  const activeSprint=sprints.find(s=>s.is_active)||sprints[0];
-  let ts=tasks.filter(t=>t.type!=='phase'&&t.type!=='milestone');
-  if(activeSprint)ts=ts.filter(t=>t.sprint_id===activeSprint.id);
-  if(hideAgenda)ts=ts.filter(t=>t.type!=='agenda');
+export function renderBoard({mount,tasks,people,deliverables,sprints,projects,selId,lane,hideAgenda,onSelect,onStatusChange,global=false}){
+  let ts=tasks.filter(t=>t.type!=='phase'&&t.type!=='milestone'&&t.type!=='meeting');
+
+  if(global){
+    // Global board: only tasks from ACTIVE projects, ignore sprint filter
+    const activeProjectIds=new Set((projects||[]).filter(p=>p.status==='active').map(p=>p.id));
+    ts=ts.filter(t=>activeProjectIds.has(t.project_id));
+    // Global board hides agenda/action/followup shells so it stays focused on delivery work
+    ts=ts.filter(t=>t.type!=='agenda'&&t.type!=='action'&&t.type!=='followup');
+  } else {
+    const activeSprint=sprints.find(s=>s.is_active)||sprints[0];
+    if(activeSprint)ts=ts.filter(t=>t.sprint_id===activeSprint.id);
+    if(hideAgenda)ts=ts.filter(t=>t.type!=='agenda'&&t.type!=='action');
+  }
 
   const risky=ts.filter(t=>clientNoDate(t,people));
   const banner=risky.length?`<div class="banner"><i class="ti ti-alert-triangle"></i>
@@ -93,6 +102,7 @@ export function renderBoard({mount,tasks,people,deliverables,sprints,selId,lane,
       if(lane==='deliverable'){const d=t.deliverable_id?deliverables.find(x=>x.id===t.deliverable_id):null;k=d?d.id:'none';n=d?d.name:'No deliverable';}
       else if(lane==='owner'){const o=people.find(p=>p.id===t.owner_id);k=o?o.id:'none';n=o?o.name:'Unassigned';}
       else if(lane==='type'){k=t.type;n=T(t.type).label;}
+      else if(lane==='project'){const p=projects?.find(x=>x.id===t.project_id);k=p?p.id:'none';n=p?p.name:'—';}
       if(!groups.has(k))groups.set(k,{name:n,items:[]});
       groups.get(k).items.push(t);
     });

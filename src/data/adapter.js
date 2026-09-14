@@ -24,7 +24,7 @@ export class SupabaseAdapter {
   async loadOverview() {
     const [projects, tasks, people, deliverables] = await Promise.all([
       this.sb.from('projects').select('*'),
-      this.sb.from('tasks').select('id,project_id,status,end_date,owner_id,type,flagged'),
+      this.sb.from('tasks').select('*'),
       this.sb.from('people').select('*'),
       this.sb.from('deliverables').select('id,project_id,name,status,due_date,sort_order'),
     ]);
