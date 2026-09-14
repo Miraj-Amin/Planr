@@ -245,6 +245,15 @@ function openImportPreview(parsed, db, onDone) {
       const phaseIds = new Map(phaseNames.map(name => [name, crypto.randomUUID()]));
       const taskIds  = parsed.tasks.map(() => crypto.randomUUID());
 
+      // Extract phase-level WBS from the first task in each phase (the "1"
+      // prefix from "1.1"). Falls back to the phase's index if no task WBS.
+      const phaseWbs = new Map();
+      phaseNames.forEach((name, i) => {
+        const firstTaskWithWbs = parsed.tasks.find(t => (t.phase || '(No phase)') === name && t.wbs);
+        const wbs = firstTaskWithWbs ? String(firstTaskWithWbs.wbs).split('.')[0] : String(i + 1);
+        phaseWbs.set(name, wbs);
+      });
+
       // Round A — phases
       await Promise.all(phaseNames.map((name, i) => db.insertAwait('template_tasks', {
         id:          phaseIds.get(name),
@@ -253,6 +262,7 @@ function openImportPreview(parsed, db, onDone) {
         type:        'phase',
         name,
         phase:       name,
+        wbs:         phaseWbs.get(name),
         sort_order:  (i + 1) * 10000,
       })));
 

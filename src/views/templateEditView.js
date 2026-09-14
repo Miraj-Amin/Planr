@@ -1,15 +1,18 @@
 // templateEditView.js — Hierarchical plan editor for a template.
 //
-// Data shape: template_tasks with self-referencing parent_id and type.
-//   type='phase'       — top-level, no parent
-//   type='task'        — child of a phase
-//   type='milestone'   — same as task but rendered with a milestone icon
-//   type='deliverable' — child of a task, produced by that task
+// One unified grid. Every row (phase, task, milestone, deliverable) lives in the
+// same table. WBS drives indentation:  "1" → depth 0, "1.1" → depth 1, "1.1.1"
+// → depth 2. Deliverables have no WBS so they use their parent's depth + 1.
 //
-// If a template exists in the old flat shape (no phase rows), we run a
-// silent migration on open: create phase rows from the `phase` text field,
-// reparent tasks, convert primary_deliverable text into deliverable children.
-// This is idempotent — the migration checks for existing phase rows first.
+// Rows with children get a chevron that expands/collapses them. Phases show a
+// folder icon in their type colour. Milestones show a filled diamond — click to
+// toggle back to a plain task. Deliverables show a package icon.
+//
+// On open the editor auto-migrates two legacy states:
+//   1. Flat template_tasks (no phase rows) → create phase rows, reparent tasks,
+//      turn primary_deliverable text into deliverable child rows.
+//   2. Phase rows without a WBS → backfill from their first child's WBS prefix.
+// Both are idempotent.
 
 const PHASE_COLORS = {
   'Initiation & Handover':   '#7F77DD',
@@ -29,24 +32,26 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
       <div class="tpl-empty">
         <i class="ti ti-alert-circle" style="font-size:24px;color:#C4C9D4;margin-bottom:8px"></i>
         <div>Template not found.</div>
-        <button class="btn" style="margin-top:14px;height:32px;padding:0 14px;font-size:12px" id="teBackMissing">Back to templates</button>
+        <button class="btn" style="margin-top:14px;height:32px;padding:0 14px;font-size:12px" id="tepBackMissing">Back to templates</button>
       </div>
     </div></div>`;
-    mount.querySelector('#teBackMissing')?.addEventListener('click', onBack);
+    mount.querySelector('#tepBackMissing')?.addEventListener('click', onBack);
     return;
   }
 
-  let allRows = (template_tasks || []).filter(t => t.template_id === templateId);
+  const allRows = (template_tasks || []).filter(t => t.template_id === templateId);
 
-  // ── Auto-migrate old flat templates to hierarchical ──────────────
-  const hasHierarchy = allRows.some(r => r.type === 'phase');
-  if (!hasHierarchy && allRows.length > 0) {
-    mount.innerHTML = `<div class="te-wrap"><div class="te-body" style="display:flex;align-items:center;justify-content:center;flex:1;color:#6B7280;font-size:13px;gap:10px">
+  // ── Auto-migrations ─────────────────────────────────────────────
+  const needsFlatMigration    = !allRows.some(r => r.type === 'phase') && allRows.length > 0;
+  const needsPhaseWbsBackfill = allRows.some(r => r.type === 'phase' && !r.wbs);
+  if (needsFlatMigration || needsPhaseWbsBackfill) {
+    mount.innerHTML = `<div class="tep-wrap"><div class="tep-body" style="display:flex;align-items:center;justify-content:center;flex:1;color:#6B7280;font-size:13px;gap:10px">
       <i class="ti ti-loader-2" style="font-size:16px;animation:spin .8s linear infinite"></i>
-      Reorganising template into phases → tasks → deliverables…
+      Reorganising template…
     </div></div>`;
     try {
-      await migrateFlatToHierarchy(templateId, allRows, db);
+      if (needsFlatMigration)    await migrateFlatToHierarchy(templateId, allRows, db);
+      if (needsPhaseWbsBackfill) await backfillPhaseWbs(templateId, db);
       onRerender();
       return;
     } catch (err) {
@@ -55,49 +60,100 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
   }
 
   // ── Build the tree from parent_id ────────────────────────────────
+  const byId = new Map(allRows.map(r => [r.id, r]));
   const childrenOf = new Map();
   allRows.forEach(r => {
     const k = r.parent_id || 'root';
     if (!childrenOf.has(k)) childrenOf.set(k, []);
     childrenOf.get(k).push(r);
   });
-  childrenOf.forEach(arr => arr.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)));
+  // Sort siblings by WBS if any have it, else by sort_order.
+  childrenOf.forEach(arr => arr.sort((a, b) => {
+    if (a.wbs && b.wbs) return compareWbs(a.wbs, b.wbs);
+    if (a.wbs) return -1;
+    if (b.wbs) return  1;
+    return (a.sort_order || 0) - (b.sort_order || 0);
+  }));
 
-  const phases = childrenOf.get('root') || [];
-  const tasksIn = phaseId => (childrenOf.get(phaseId) || []).filter(r => r.type !== 'deliverable');
-  const delivsOf = taskId  => (childrenOf.get(taskId)  || []).filter(r => r.type === 'deliverable');
+  const totalTasks  = allRows.filter(r => r.type === 'task' || r.type === 'milestone').length;
+  const totalPhases = allRows.filter(r => r.type === 'phase').length;
 
-  const totalTasks = allRows.filter(r => r.type === 'task' || r.type === 'milestone').length;
-
-  // ── Collapse state persisted per template ────────────────────────
+  // ── Collapse state (persisted per template) ──────────────────────
   const collapsedKey = `planr_tpl_collapsed_${templateId}`;
   let collapsed = new Set();
   try { collapsed = new Set(JSON.parse(localStorage.getItem(collapsedKey) || '[]')); } catch (e) {}
   const persistCollapsed = () => { try { localStorage.setItem(collapsedKey, JSON.stringify([...collapsed])); } catch (e) {} };
 
+  // ── Walk the tree into a flat display list ───────────────────────
+  const rendered = [];
+  const walk = (nodes, depth) => {
+    for (const n of nodes) {
+      const kids = childrenOf.get(n.id) || [];
+      rendered.push({ row: n, depth, hasChildren: kids.length > 0, isCollapsed: collapsed.has(n.id) });
+      if (!collapsed.has(n.id) && kids.length) walk(kids, depth + 1);
+    }
+  };
+  walk(childrenOf.get('root') || [], 0);
+
   // ── Render ───────────────────────────────────────────────────────
   mount.innerHTML = `
-    <div class="te-wrap">
-      <div class="te-header">
-        <button class="te-back-btn" id="teBack">
+    <div class="tep-wrap">
+      <div class="tep-header">
+        <button class="tep-back-btn" id="tepBack">
           <i class="ti ti-chevron-left" style="font-size:12px"></i>Templates
         </button>
-        <div class="te-title-block">
-          <input class="te-title-in" data-tpl-field="name" value="${escapeAttr(tpl.name || '')}" placeholder="Untitled template">
-          <input class="te-desc-in"  data-tpl-field="description" value="${escapeAttr(tpl.description || '')}" placeholder="Description (optional)">
+        <div class="tep-title-block">
+          <input class="tep-title-in" data-tpl-field="name" value="${escapeAttr(tpl.name || '')}" placeholder="Untitled template">
+          <input class="tep-desc-in"  data-tpl-field="description" value="${escapeAttr(tpl.description || '')}" placeholder="Description (optional)">
         </div>
-        <div class="te-stats">
-          <div class="te-stat"><b>${totalTasks}</b><span>tasks</span></div>
-          <div class="te-stat"><b>${phases.length}</b><span>phases</span></div>
+        <div class="tep-stats">
+          <div class="tep-stat"><b>${totalTasks}</b><span>tasks</span></div>
+          <div class="tep-stat"><b>${totalPhases}</b><span>phases</span></div>
         </div>
       </div>
 
-      <div class="te-body">
-        ${phases.length === 0
-          ? `<div class="te-empty-inline">This template has no phases yet. Add one to start.</div>`
-          : phases.map(phase => phaseSectionHTML(phase, tasksIn(phase.id), delivsOf, collapsed.has(phase.id))).join('')}
-        <div class="te-add-phase-wrap">
-          <button class="te-add-phase-btn" id="teAddPhase">
+      <div class="tep-body">
+        <div class="tep-scroll">
+          <table class="tep-table">
+            <colgroup>
+              <col style="width:26px">
+              <col style="width:80px">
+              <col style="min-width:360px">
+              <col style="width:130px">
+              <col style="width:130px">
+              <col style="width:130px">
+              <col style="width:54px">
+              <col style="width:54px">
+              <col style="width:100px">
+              <col style="min-width:220px">
+              <col style="min-width:150px">
+              <col style="width:100px">
+            </colgroup>
+            <thead>
+              <tr>
+                <th></th>
+                <th>WBS</th>
+                <th>Task / Deliverable</th>
+                <th>Workstream</th>
+                <th>Owner role</th>
+                <th>Accountable</th>
+                <th title="Duration (workdays)">Dur</th>
+                <th title="Start offset (workdays)">Off</th>
+                <th>Depends on</th>
+                <th>Acceptance criteria</th>
+                <th>Key dependency</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rendered.length === 0
+                ? `<tr><td colspan="12" class="tep-empty-inline">This template has no phases yet. Add one below.</td></tr>`
+                : rendered.map(r => rowHTML(r, byId)).join('')}
+            </tbody>
+          </table>
+        </div>
+        <div class="tep-add-phase-wrap">
+          <button class="tep-add-phase-btn" id="tepAddPhase">
             <i class="ti ti-plus" style="font-size:12px"></i>Add phase
           </button>
         </div>
@@ -106,7 +162,7 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
   `;
 
   // ── Header wiring ────────────────────────────────────────────────
-  mount.querySelector('#teBack')?.addEventListener('click', onBack);
+  mount.querySelector('#tepBack')?.addEventListener('click', onBack);
   mount.querySelectorAll('[data-tpl-field]').forEach(el => {
     el.addEventListener('blur', () => {
       const field = el.dataset.tplField;
@@ -118,8 +174,8 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
     });
   });
 
-  // ── Phase toggle / rename / delete / add-task ────────────────────
-  mount.querySelectorAll('.te-phase-collapse').forEach(btn => {
+  // ── Chevron collapse ────────────────────────────────────────────
+  mount.querySelectorAll('.tep-chev').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
       if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
@@ -127,78 +183,9 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
       onRerender();
     });
   });
-  mount.querySelectorAll('.te-phase-rename').forEach(inp => {
-    const original = inp.defaultValue;
-    inp.addEventListener('blur', () => {
-      const v = inp.value.trim();
-      if (!v) { inp.value = original; return; }
-      if (v === original) return;
-      const id = inp.dataset.id;
-      db.update('template_tasks', id, { name: v, phase: v });
-      // Cascade the `phase` text-field on descendants (nice for legacy queries)
-      const descendants = allRows.filter(r => r.parent_id === id);
-      descendants.forEach(d => db.update('template_tasks', d.id, { phase: v }));
-    });
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
-  });
-  mount.querySelectorAll('.te-phase-del').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.id;
-      const row = allRows.find(r => r.id === id);
-      const taskCount = tasksIn(id).length;
-      if (!confirm(`Delete phase "${row?.name || ''}" and its ${taskCount} task${taskCount === 1 ? '' : 's'}?`)) return;
-      // Cascade delete: FK ON DELETE CASCADE handles it in Supabase, but also
-      // wipe the cache so the view is consistent without waiting for a reload.
-      const kill = pid => {
-        (childrenOf.get(pid) || []).forEach(c => kill(c.id));
-        db.remove('template_tasks', pid);
-      };
-      kill(id);
-      collapsed.delete(id); persistCollapsed();
-      onRerender();
-    });
-  });
-  mount.querySelectorAll('.te-phase-addtask').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const phaseId = btn.dataset.id;
-      const phaseRow = allRows.find(r => r.id === phaseId);
-      const siblings = tasksIn(phaseId);
-      const maxSort = siblings.length ? Math.max(...siblings.map(s => s.sort_order || 0)) : 0;
-      db.insert('template_tasks', {
-        template_id:            templateId,
-        parent_id:              phaseId,
-        type:                   'task',
-        name:                   '',
-        phase:                  phaseRow?.name || null,
-        duration_workdays:      1,
-        start_offset_workdays:  0,
-        is_milestone:           false,
-        sort_order:             maxSort + 100,
-      });
-      onRerender();
-    });
-  });
 
-  // ── Add phase ────────────────────────────────────────────────────
-  mount.querySelector('#teAddPhase')?.addEventListener('click', () => {
-    const name = prompt('Phase name:');
-    if (!name || !name.trim()) return;
-    const trimmed = name.trim();
-    const maxSort = phases.length ? Math.max(...phases.map(p => p.sort_order || 0)) : 0;
-    db.insert('template_tasks', {
-      template_id: templateId,
-      parent_id:   null,
-      type:        'phase',
-      name:        trimmed,
-      phase:       trimmed,
-      sort_order:  maxSort + 10000,
-    });
-    onRerender();
-  });
-
-  // ── Row-level actions (per task or deliverable) ──────────────────
-  // Inline edits
-  mount.querySelectorAll('.te-in').forEach(el => {
+  // ── Inline edits ────────────────────────────────────────────────
+  mount.querySelectorAll('.tep-in').forEach(el => {
     const commit = () => {
       const id = el.dataset.id;
       const field = el.dataset.field;
@@ -215,10 +202,11 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
       if ((cur[field] ?? null) !== (val ?? null)) db.update('template_tasks', id, { [field]: val });
     };
     el.addEventListener('blur', commit);
+    el.addEventListener('keydown', e => { if (e.key === 'Enter' && el.tagName === 'INPUT' && el.type !== 'textarea') el.blur(); });
   });
 
-  // Toggle milestone
-  mount.querySelectorAll('.te-milestone-toggle').forEach(btn => {
+  // ── Milestone toggle ────────────────────────────────────────────
+  mount.querySelectorAll('.tep-milestone-toggle').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
       const cur = db.get('template_tasks', id);
@@ -232,46 +220,74 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
     });
   });
 
-  // Add deliverable child under a task
-  mount.querySelectorAll('.te-add-deliv').forEach(btn => {
+  // ── Row actions ─────────────────────────────────────────────────
+  mount.querySelectorAll('.tep-add-child').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const parentId = btn.dataset.id;
+      const parent = byId.get(parentId);
+      if (!parent) return;
+      const siblings = (childrenOf.get(parentId) || []).filter(c => c.type !== 'deliverable');
+      const nextIdx = siblings.length + 1;
+      const wbs = parent.wbs ? `${parent.wbs}.${nextIdx}` : null;
+      const type = parent.type === 'phase' ? 'task' : 'task';
+      db.insert('template_tasks', {
+        template_id:           templateId,
+        parent_id:             parentId,
+        type,
+        name:                  '',
+        wbs,
+        phase:                 parent.type === 'phase' ? parent.name : parent.phase,
+        duration_workdays:     1,
+        start_offset_workdays: 0,
+        is_milestone:          false,
+        sort_order:            (siblings.length + 1) * 100,
+      });
+      collapsed.delete(parentId); persistCollapsed();
+      onRerender();
+    });
+  });
+
+  mount.querySelectorAll('.tep-add-deliv').forEach(btn => {
     btn.addEventListener('click', () => {
       const taskId = btn.dataset.id;
+      const existing = (childrenOf.get(taskId) || []).filter(c => c.type === 'deliverable');
       db.insert('template_tasks', {
         template_id: templateId,
         parent_id:   taskId,
         type:        'deliverable',
         name:        '',
-        sort_order:  100,
+        sort_order:  (existing.length + 1) * 100,
       });
+      collapsed.delete(taskId); persistCollapsed();
       onRerender();
     });
   });
 
-  // Delete task / deliverable
-  mount.querySelectorAll('.te-row-del').forEach(btn => {
+  mount.querySelectorAll('.tep-del').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
-      const row = allRows.find(r => r.id === id);
-      const kind = row?.type === 'deliverable' ? 'deliverable' : 'task';
-      const kids = (childrenOf.get(id) || []).length;
-      const msg = kids ? `Delete this ${kind} and its ${kids} deliverable${kids === 1 ? '' : 's'}?`
-                       : `Delete this ${kind}?`;
-      if (!confirm(msg)) return;
+      const row = byId.get(id);
+      if (!row) return;
+      const descendants = countDescendants(id, childrenOf);
+      const kindLabel = row.type === 'phase' ? 'phase' : row.type === 'deliverable' ? 'deliverable' : 'task';
+      const suffix = descendants ? ` (and ${descendants} row${descendants === 1 ? '' : 's'} beneath)` : '';
+      if (!confirm(`Delete ${kindLabel} "${row.name || 'Untitled'}"${suffix}?`)) return;
+      // ON DELETE CASCADE handles it in Supabase; also wipe cache descendants.
       const kill = pid => {
         (childrenOf.get(pid) || []).forEach(c => kill(c.id));
         db.remove('template_tasks', pid);
       };
       kill(id);
+      collapsed.delete(id); persistCollapsed();
       onRerender();
     });
   });
 
-  // Reorder rows (up/down among siblings)
-  mount.querySelectorAll('.te-row-up, .te-row-down').forEach(btn => {
+  mount.querySelectorAll('.tep-up, .tep-down').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
-      const dir = btn.classList.contains('te-row-up') ? -1 : 1;
-      const row = allRows.find(r => r.id === id);
+      const dir = btn.classList.contains('tep-up') ? -1 : 1;
+      const row = byId.get(id);
       if (!row) return;
       const siblings = (childrenOf.get(row.parent_id || 'root') || [])
         .filter(s => s.type === row.type || (row.type !== 'deliverable' && s.type !== 'deliverable'))
@@ -285,127 +301,124 @@ export async function renderTemplateEdit({ mount, templateId, templates, templat
       onRerender();
     });
   });
+
+  // ── Add phase ────────────────────────────────────────────────────
+  mount.querySelector('#tepAddPhase')?.addEventListener('click', () => {
+    const name = prompt('Phase name:');
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    const phases = (childrenOf.get('root') || []);
+    const nextWbs = String(phases.length + 1);
+    const maxSort = phases.length ? Math.max(...phases.map(p => p.sort_order || 0)) : 0;
+    db.insert('template_tasks', {
+      template_id: templateId,
+      parent_id:   null,
+      type:        'phase',
+      name:        trimmed,
+      phase:       trimmed,
+      wbs:         nextWbs,
+      sort_order:  maxSort + 10000,
+    });
+    onRerender();
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════
-// One phase section — a titled block with a table of its tasks and
-// deliverables. Deliverables render as indented sub-rows below their task.
+// One row in the unified grid.
 // ══════════════════════════════════════════════════════════════════
-function phaseSectionHTML(phase, tasks, delivsOf, isCollapsed) {
-  const color = PHASE_COLORS[phase.name] || '#9CA3AF';
-  return `
-    <div class="te-phase">
-      <div class="te-phase-head" style="border-left:3px solid ${color}">
-        <button class="te-phase-collapse" data-id="${phase.id}">
-          <i class="ti ${isCollapsed ? 'ti-chevron-right' : 'ti-chevron-down'}" style="font-size:12px"></i>
-        </button>
-        <i class="ti ti-folder" style="font-size:12px;color:${color}"></i>
-        <input class="te-phase-rename" data-id="${phase.id}" value="${escapeAttr(phase.name || '')}">
-        <span class="te-phase-count">${tasks.length}</span>
-        <div style="flex:1"></div>
-        <button class="te-phase-addtask" data-id="${phase.id}" title="Add task">
-          <i class="ti ti-plus" style="font-size:12px"></i>
-        </button>
-        <button class="te-phase-del" data-id="${phase.id}" title="Delete phase">
-          <i class="ti ti-trash" style="font-size:12px"></i>
-        </button>
-      </div>
-      ${isCollapsed ? '' : `
-        <div class="te-table-scroll">
-          <table class="te-table">
-            <thead>
-              <tr>
-                <th style="width:64px">WBS</th>
-                <th style="min-width:320px">Task / Deliverable</th>
-                <th style="width:130px">Workstream</th>
-                <th style="width:130px">Owner role</th>
-                <th style="width:130px">Accountable</th>
-                <th style="width:56px" title="Duration in workdays">Dur</th>
-                <th style="width:56px" title="Start offset in workdays">Off</th>
-                <th style="width:110px">Depends on</th>
-                <th style="min-width:220px">Acceptance criteria</th>
-                <th style="min-width:150px">Key dependency</th>
-                <th style="width:88px"></th>
-              </tr>
-            </thead>
-            <tbody>
-              ${tasks.length === 0
-                ? `<tr><td colspan="11" style="text-align:center;padding:20px;color:#C4C9D4;font-size:11px">No tasks yet. Click + on the phase header to add one.</td></tr>`
-                : tasks.flatMap(t => {
-                    const rows = [taskRowHTML(t)];
-                    delivsOf(t.id).forEach(d => rows.push(delivRowHTML(d)));
-                    return rows;
-                  }).join('')
-              }
-            </tbody>
-          </table>
-        </div>
-      `}
-    </div>
-  `;
-}
+function rowHTML({ row, depth, hasChildren, isCollapsed }, byId) {
+  // Indent from WBS depth. Deliverables have no WBS, so lean on their parent's
+  // depth + 1. Fall back to tree depth for anything odd.
+  const wbsDepth = (row.wbs || '').split('.').filter(Boolean).length - 1;
+  let indentLevel;
+  if (row.type === 'deliverable') {
+    const parent = byId.get(row.parent_id);
+    const parentWbsDepth = (parent?.wbs || '').split('.').filter(Boolean).length - 1;
+    indentLevel = Math.max(0, parentWbsDepth + 1, depth);
+  } else if (row.wbs) {
+    indentLevel = Math.max(0, wbsDepth);
+  } else {
+    indentLevel = depth;
+  }
+  const indent = indentLevel * 18;
 
-// A task or milestone row. Milestones show a diamond icon and can be toggled
-// back to a plain task by clicking it. WBS depth indents the name column.
-function taskRowHTML(t) {
-  const isMilestone = t.type === 'milestone';
-  const wbsDepth = wbsDepthOf(t.wbs);
-  const nameIndent = wbsDepth * 14;
+  const isPhase       = row.type === 'phase';
+  const isMilestone   = row.type === 'milestone';
+  const isDeliverable = row.type === 'deliverable';
+
+  const phaseColor = PHASE_COLORS[row.name] || '#534AB7';
   const numCSS = 'font-family:JetBrains Mono, monospace;font-size:11px;text-align:center';
-  return `<tr class="te-row te-row-${t.type}">
-    <td><input class="te-in" data-id="${t.id}" data-field="wbs" value="${escapeAttr(t.wbs || '')}" style="font-family:JetBrains Mono, monospace;font-size:11px"></td>
+  const wbsCSS = 'font-family:JetBrains Mono, monospace;font-size:11px';
+
+  // Icon + name column
+  let iconHTML;
+  if (isPhase) {
+    iconHTML = `<i class="ti ti-folder-filled tep-type-icon" style="color:${phaseColor}"></i>`;
+  } else if (isDeliverable) {
+    iconHTML = `<i class="ti ti-package tep-type-icon" style="color:#1D9E75"></i>`;
+  } else {
+    // Task or milestone — clickable icon toggles milestone flag
+    iconHTML = `<button class="tep-milestone-toggle" data-id="${row.id}" title="${isMilestone ? 'Unset milestone' : 'Mark as milestone'}">
+      <i class="ti ${isMilestone ? 'ti-diamond-filled' : 'ti-diamond'}" style="font-size:12px;color:${isMilestone ? '#BA7517' : '#C4C9D4'}"></i>
+    </button>`;
+  }
+
+  const nameStyle = isPhase       ? 'font-weight:600;font-size:12.5px'
+                  : isDeliverable ? 'font-weight:400;color:#374151;font-size:11.5px'
+                  : 'font-weight:500';
+  const namePlaceholder = isPhase ? 'Phase name' : isDeliverable ? 'Deliverable' : 'Task name';
+
+  // Action buttons on the right — vary by type
+  const addChildBtn  = (isPhase || (!isDeliverable && !isMilestone))
+    ? `<button class="tep-row-btn tep-add-child" data-id="${row.id}" title="Add ${isPhase ? 'task' : 'sub-task'}"><i class="ti ti-plus" style="font-size:11px"></i></button>` : '';
+  const addDelivBtn  = (!isPhase && !isDeliverable)
+    ? `<button class="tep-row-btn tep-add-deliv" data-id="${row.id}" title="Add deliverable"><i class="ti ti-package-plus" style="font-size:11px"></i></button>` : '';
+
+  const rowClass = `tep-row tep-row-${row.type}`;
+
+  // Non-name columns — blank on phases/deliverables
+  const nonNameCells = isPhase || isDeliverable
+    ? `<td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>`
+    : `
+      <td><input class="tep-in" data-id="${row.id}" data-field="workstream" value="${escapeAttr(row.workstream || '')}"></td>
+      <td><input class="tep-in" data-id="${row.id}" data-field="owner_role" value="${escapeAttr(row.owner_role || '')}" placeholder="e.g. Project Manager"></td>
+      <td><input class="tep-in" data-id="${row.id}" data-field="accountable_role" value="${escapeAttr(row.accountable_role || '')}"></td>
+      <td><input class="tep-in" type="number" min="0" data-id="${row.id}" data-field="duration_workdays" value="${row.duration_workdays ?? ''}" style="${numCSS}"></td>
+      <td><input class="tep-in" type="number" min="0" data-id="${row.id}" data-field="start_offset_workdays" value="${row.start_offset_workdays ?? ''}" style="${numCSS}"></td>
+      <td><input class="tep-in" data-id="${row.id}" data-field="predecessor_wbs" value="${escapeAttr(row.predecessor_wbs || '')}" style="${wbsCSS}"></td>
+      <td><input class="tep-in" data-id="${row.id}" data-field="acceptance_criteria" value="${escapeAttr(row.acceptance_criteria || '')}" placeholder="What does done look like?"></td>
+      <td><input class="tep-in" data-id="${row.id}" data-field="key_dependency" value="${escapeAttr(row.key_dependency || '')}"></td>
+    `;
+
+  return `<tr class="${rowClass}" data-id="${row.id}">
+    <td class="tep-chev-cell">
+      ${hasChildren ? `<button class="tep-chev" data-id="${row.id}" title="${isCollapsed ? 'Expand' : 'Collapse'}">
+        <i class="ti ${isCollapsed ? 'ti-chevron-right' : 'ti-chevron-down'}" style="font-size:11px"></i>
+      </button>` : ''}
+    </td>
     <td>
-      <div class="te-name-cell" style="padding-left:${nameIndent}px">
-        <button class="te-milestone-toggle" data-id="${t.id}" title="${isMilestone ? 'Unset milestone' : 'Mark as milestone'}">
-          <i class="ti ${isMilestone ? 'ti-diamond-filled' : 'ti-diamond'}" style="font-size:13px;color:${isMilestone ? '#BA7517' : '#C4C9D4'}"></i>
-        </button>
-        <input class="te-in te-name-in" data-id="${t.id}" data-field="name" value="${escapeAttr(t.name || '')}" placeholder="Task name" style="font-weight:500">
-        <button class="te-add-deliv" data-id="${t.id}" title="Add deliverable">
-          <i class="ti ti-package-plus" style="font-size:12px"></i>
-        </button>
+      <input class="tep-in" data-id="${row.id}" data-field="wbs" value="${escapeAttr(row.wbs || '')}" style="${wbsCSS}" ${isDeliverable ? 'disabled' : ''}>
+    </td>
+    <td class="tep-name-td">
+      <div class="tep-name-cell" style="padding-left:${indent}px">
+        ${iconHTML}
+        <input class="tep-in tep-name-in" data-id="${row.id}" data-field="name" value="${escapeAttr(row.name || '')}" placeholder="${namePlaceholder}" style="${nameStyle}">
       </div>
     </td>
-    <td><input class="te-in" data-id="${t.id}" data-field="workstream" value="${escapeAttr(t.workstream || '')}"></td>
-    <td><input class="te-in" data-id="${t.id}" data-field="owner_role" value="${escapeAttr(t.owner_role || '')}" placeholder="e.g. Project Manager"></td>
-    <td><input class="te-in" data-id="${t.id}" data-field="accountable_role" value="${escapeAttr(t.accountable_role || '')}"></td>
-    <td><input class="te-in" type="number" min="0" data-id="${t.id}" data-field="duration_workdays" value="${t.duration_workdays ?? ''}" style="${numCSS}"></td>
-    <td><input class="te-in" type="number" min="0" data-id="${t.id}" data-field="start_offset_workdays" value="${t.start_offset_workdays ?? ''}" style="${numCSS}"></td>
-    <td><input class="te-in" data-id="${t.id}" data-field="predecessor_wbs" value="${escapeAttr(t.predecessor_wbs || '')}" style="font-family:JetBrains Mono, monospace;font-size:11px"></td>
-    <td><input class="te-in" data-id="${t.id}" data-field="acceptance_criteria" value="${escapeAttr(t.acceptance_criteria || '')}" placeholder="What does done look like?"></td>
-    <td><input class="te-in" data-id="${t.id}" data-field="key_dependency" value="${escapeAttr(t.key_dependency || '')}"></td>
-    <td style="white-space:nowrap;text-align:right">
-      <button class="te-row-btn te-row-up"   data-id="${t.id}" title="Move up"><i class="ti ti-chevron-up"   style="font-size:11px"></i></button>
-      <button class="te-row-btn te-row-down" data-id="${t.id}" title="Move down"><i class="ti ti-chevron-down" style="font-size:11px"></i></button>
-      <button class="te-row-btn te-row-del"  data-id="${t.id}" title="Delete"><i class="ti ti-trash" style="font-size:11px"></i></button>
+    ${nonNameCells}
+    <td class="tep-actions">
+      ${addChildBtn}${addDelivBtn}
+      <button class="tep-row-btn tep-up"   data-id="${row.id}" title="Move up"><i class="ti ti-chevron-up"   style="font-size:11px"></i></button>
+      <button class="tep-row-btn tep-down" data-id="${row.id}" title="Move down"><i class="ti ti-chevron-down" style="font-size:11px"></i></button>
+      <button class="tep-row-btn tep-del"  data-id="${row.id}" title="Delete"><i class="ti ti-trash" style="font-size:11px"></i></button>
     </td>
   </tr>`;
 }
 
-// A deliverable — child of a task. Rendered as a de-emphasised sub-row with a
-// package icon. Only the name is editable inline.
-function delivRowHTML(d) {
-  const parentIndent = wbsDepthOf(d.wbs || '') * 14;
-  return `<tr class="te-row te-row-deliverable">
-    <td></td>
-    <td>
-      <div class="te-name-cell" style="padding-left:${parentIndent + 26}px">
-        <i class="ti ti-package" style="font-size:12px;color:#1D9E75"></i>
-        <input class="te-in te-name-in" data-id="${d.id}" data-field="name" value="${escapeAttr(d.name || '')}" placeholder="Deliverable name" style="font-weight:400">
-      </div>
-    </td>
-    <td colspan="8" style="color:#C4C9D4;font-size:11px;padding-left:12px">Deliverable</td>
-    <td style="white-space:nowrap;text-align:right">
-      <button class="te-row-btn te-row-up"  data-id="${d.id}" title="Move up"><i class="ti ti-chevron-up"   style="font-size:11px"></i></button>
-      <button class="te-row-btn te-row-down" data-id="${d.id}" title="Move down"><i class="ti ti-chevron-down" style="font-size:11px"></i></button>
-      <button class="te-row-btn te-row-del"  data-id="${d.id}" title="Delete"><i class="ti ti-trash" style="font-size:11px"></i></button>
-    </td>
-  </tr>`;
-}
-
-// Migration: old flat template_tasks → hierarchical (phases + tasks + deliverables).
-// Runs once on editor open when no phase-type rows exist yet.
+// ══════════════════════════════════════════════════════════════════
+// Migrations
+// ══════════════════════════════════════════════════════════════════
 async function migrateFlatToHierarchy(templateId, allRows, db) {
-  // Group by phase text, preserving first-seen order (which mirrors sort_order).
   const phaseNames = [];
   const seenPhases = new Set();
   const sorted = allRows.slice().sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
@@ -414,10 +427,16 @@ async function migrateFlatToHierarchy(templateId, allRows, db) {
     if (!seenPhases.has(p)) { seenPhases.add(p); phaseNames.push(p); }
   });
 
-  // Pre-generate phase IDs so tasks can reference them without waiting.
+  // Extract phase WBS from first task per phase
+  const phaseWbs = new Map();
+  phaseNames.forEach((name, i) => {
+    const first = sorted.find(r => (r.phase || '(No phase)') === name && r.wbs);
+    phaseWbs.set(name, first ? String(first.wbs).split('.')[0] : String(i + 1));
+  });
+
   const phaseIds = new Map(phaseNames.map(name => [name, crypto.randomUUID()]));
 
-  // Round 1: create phase rows
+  // Round 1: phase rows
   await Promise.all(phaseNames.map((name, i) => db.insertAwait('template_tasks', {
     id:          phaseIds.get(name),
     template_id: templateId,
@@ -425,16 +444,17 @@ async function migrateFlatToHierarchy(templateId, allRows, db) {
     type:        'phase',
     name,
     phase:       name,
+    wbs:         phaseWbs.get(name),
     sort_order:  (i + 1) * 10000,
   })));
 
-  // Round 2: reparent existing tasks and set their type
+  // Round 2: reparent existing rows + set type
   await Promise.all(sorted.map(t => db.updateAwait('template_tasks', t.id, {
     parent_id: phaseIds.get(t.phase || '(No phase)'),
     type:      t.is_milestone ? 'milestone' : 'task',
   })));
 
-  // Round 3: create deliverable rows from primary_deliverable text
+  // Round 3: deliverable rows from primary_deliverable text
   const withDelivs = sorted.filter(t => t.primary_deliverable && String(t.primary_deliverable).trim());
   await Promise.all(withDelivs.map(t => db.insertAwait('template_tasks', {
     template_id: templateId,
@@ -445,10 +465,36 @@ async function migrateFlatToHierarchy(templateId, allRows, db) {
   })));
 }
 
-function wbsDepthOf(wbs) {
-  if (!wbs) return 0;
-  const parts = String(wbs).split('.').filter(Boolean);
-  return Math.max(0, parts.length - 2);   // 1 → 0, 1.1 → 0, 1.1.1 → 1, etc.
+async function backfillPhaseWbs(templateId, db) {
+  const rows = db.all('template_tasks').filter(r => r.template_id === templateId);
+  const phases = rows.filter(r => r.type === 'phase' && !r.wbs)
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+  await Promise.all(phases.map((p, i) => {
+    const child = rows.find(r => r.parent_id === p.id && r.wbs);
+    const wbs = child ? String(child.wbs).split('.')[0] : String(i + 1);
+    return db.updateAwait('template_tasks', p.id, { wbs });
+  }));
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Helpers
+// ══════════════════════════════════════════════════════════════════
+function countDescendants(id, childrenOf) {
+  let n = 0;
+  const kids = childrenOf.get(id) || [];
+  for (const c of kids) n += 1 + countDescendants(c.id, childrenOf);
+  return n;
+}
+
+// Compare WBS numerically part-by-part so "1.2" sorts before "1.10".
+function compareWbs(a, b) {
+  const ap = String(a).split('.').map(x => parseInt(x, 10) || 0);
+  const bp = String(b).split('.').map(x => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(ap.length, bp.length); i++) {
+    const d = (ap[i] || 0) - (bp[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 function escapeAttr(s) {
