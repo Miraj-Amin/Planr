@@ -46,7 +46,7 @@ export class SupabaseAdapter {
 
   // Full load for a specific project
   async load(projectId) {
-    const [people, projects, deliverables, sprints, tasks, deps, meetings] = await Promise.all([
+    const [people, projects, deliverables, sprints, tasks, deps, meetings, projectContacts] = await Promise.all([
       this.sb.from('people').select('*'),
       this.sb.from('projects').select('*'),
       this.sb.from('deliverables').select('*').eq('project_id', projectId),
@@ -54,6 +54,7 @@ export class SupabaseAdapter {
       this.sb.from('tasks').select('*').eq('project_id', projectId),
       this.sb.from('dependencies').select('*').eq('project_id', projectId),
       this.sb.from('meetings').select('*').eq('project_id', projectId),
+      this.sb.from('project_contacts').select('*').eq('project_id', projectId),
     ]);
 
     const taskIds    = (tasks.data || []).map(t => t.id);
@@ -80,6 +81,7 @@ export class SupabaseAdapter {
       meeting_items:      mitems.data        || [],
       meeting_item_links: milinks.data       || [],
       project_members:    [],
+      project_contacts:   projectContacts.data || [],
     };
 
     const errs = [people,projects,deliverables,sprints,tasks,deps,meetings,mitems,milinks]

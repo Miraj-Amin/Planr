@@ -5,6 +5,7 @@ import { renderGrid }        from './views/gridView.js';
 import { renderBoard }       from './views/boardView.js';
 import { renderFocus }       from './views/focusView.js';
 import { renderMeetings }    from './views/meetingsView.js';
+import { renderContacts }    from './views/contactsView.js';
 import { showAuth }          from './views/authView.js';
 import { newProjectForm, newTaskForm, newPhaseForm, newDeliverableForm,
          newMeetingForm, newMeetingItemForm, quickTaskForm } from './views/forms.js';
@@ -17,6 +18,7 @@ const VIEWS = [
   { id:'board',    icon:'ti-layout-kanban', label:'Board' },
   { id:'focus',    icon:'ti-sun',           label:'Focus' },
   { id:'meetings', icon:'ti-notebook',      label:'Meetings' },
+  { id:'contacts', icon:'ti-users',         label:'Contacts' },
 ];
 
 let A = {
@@ -89,6 +91,7 @@ function renderShell(isHome) {
   const btn = document.getElementById('mainBtn');
   if (btn) {
     btn.textContent = '';
+    btn.style.display = '';  // reset from prior view
     const ico = document.createElement('i');
     ico.className = 'ti ti-plus';
     ico.style.cssText = 'font-size:11px';
@@ -218,15 +221,53 @@ function renderApp() {
       meetings: projMeetings, meeting_items: db.all('meeting_items'),
       meeting_item_links: db.all('meeting_item_links'),
       tasks: projTasks(), people: people(), activeMeeting: A.meeting,
+      db, projectId: A.project,
       onSelectMeeting: id => { A.meeting=id; renderApp(); },
       onSelectTask:    id => { A.sel=A.sel===id?null:id; renderApp(); },
       onAddAgenda:     () => newMeetingItemForm(db,A.project,A.meeting,'agenda',  ()=>renderApp()),
       onAddFollowup:   () => newMeetingItemForm(db,A.project,A.meeting,'followup',()=>renderApp()),
+      onRerender:      () => renderApp(),
     });
-    document.getElementById('addMtgBtn')?.addEventListener('click', () =>
-      newMeetingForm(db, A.project, m => { A.meeting=m.id; renderApp(); }));
-    document.getElementById('mainBtn')?.addEventListener('click', () =>
-      newMeetingForm(db, A.project, m => { A.meeting=m.id; renderApp(); }));
+    const createMeeting = () => newMeetingForm(db, A.project, m => {
+      // Carry forward all unresolved items from prior meetings
+      const items = db.all('meeting_items');
+      const links = db.all('meeting_item_links');
+      const projectTasks = db.all('tasks').filter(t => t.project_id === A.project);
+      const taskById = new Map(projectTasks.map(t => [t.id, t]));
+      items.forEach(item => {
+        const task = taskById.get(item.task_id);
+        if (!task) return;
+        if (item.resolved) return;
+        if (task.status === 'done') return;
+        // Check not already linked to this new meeting
+        const already = links.some(l => l.meeting_item_id === item.id && l.meeting_id === m.id);
+        if (!already) {
+          db.insert('meeting_item_links', { meeting_item_id: item.id, meeting_id: m.id });
+        }
+      });
+      A.meeting = m.id;
+      renderApp();
+    });
+    document.getElementById('addMtgBtn')?.addEventListener('click', createMeeting);
+    document.getElementById('mainBtn')?.addEventListener('click', createMeeting);
+    return;
+  }
+
+  // ── CONTACTS ──────────────────────────────────────────────────────────────
+  if (A.view === 'contacts') {
+    mount.innerHTML = `<div id="contactsMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
+    renderContacts({
+      mount:            document.getElementById('contactsMount'),
+      people:           db.all('people'),
+      project_contacts: db.all('project_contacts'),
+      projectId:        A.project,
+      project:          db.get('projects', A.project),
+      db,
+      onRerender:       () => renderApp(),
+    });
+    // Hide the top-right button since Add is inside the view
+    const mb = document.getElementById('mainBtn');
+    if (mb) mb.style.display = 'none';
     return;
   }
 }

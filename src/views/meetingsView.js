@@ -1,114 +1,331 @@
-// meetingsView.js — Meeting log with agenda/follow-up separation,
-// carry-forward badges, and client action warnings.
+// meetingsView.js — Meeting log with agenda/follow-up separation.
+// - Add agenda / follow-up items via inline forms
+// - Open-item backlog: unresolved items from any meeting, addable to current
+// - Toggle agenda ↔ follow-up
+// - Assign owner + due date to follow-ups inline
+// - Auto-carry unresolved items into newly created meetings
+
 import { fmt, fmtLong } from '../lib/dates.js';
 
-const TODAY=new Date(2026,8,13);
-const pd=s=>s?new Date(s+'T00:00:00'):null;
-const isOverdue=t=>{const d=pd(t.end_date);return !!d&&d<TODAY&&t.status!=='done';};
-const isClient=(t,people)=>{const o=people.find(p=>p.id===t.owner_id);return !!(o&&o.is_client);};
-const noDate=(t,people)=>isClient(t,people)&&!t.end_date&&t.status!=='done';
+const TODAY = new Date();
+const pd = s => s ? new Date(s + 'T00:00:00') : null;
+const isOverdue = t => { const d = pd(t.end_date); return !!d && d < TODAY && t.status !== 'done'; };
+const isClient = (t, people) => { const o = people.find(p => p.id === t.owner_id); return !!(o && o.is_client); };
 
-function wrapTime(meeting){
-  const [h,m]=meeting.start_time.split(':').map(Number);
-  const d=new Date(2000,0,1,h,m+meeting.duration_min-10);
-  return d.toTimeString().slice(0,5);
-}
-function endTime(meeting){
-  const [h,m]=meeting.start_time.split(':').map(Number);
-  const d=new Date(2000,0,1,h,m+meeting.duration_min);
-  return d.toTimeString().slice(0,5);
+function endTime(meeting) {
+  const [h, m] = meeting.start_time.split(':').map(Number);
+  const d = new Date(2000, 0, 1, h, m + meeting.duration_min);
+  return d.toTimeString().slice(0, 5);
 }
 
-export function renderMeetings({mount,meetings,meeting_items,meeting_item_links,tasks,people,activeMeeting,onSelectMeeting,onSelectTask}){
-  const byId=new Map(tasks.map(t=>[t.id,t]));
+export function renderMeetings({
+  mount, meetings, meeting_items, meeting_item_links, tasks, people, activeMeeting,
+  db, projectId,
+  onSelectMeeting, onSelectTask, onAddAgenda, onAddFollowup, onRerender,
+}) {
+  const byId = new Map(tasks.map(t => [t.id, t]));
 
-  function itemsForMeeting(mid){
-    const linkIds=new Set(meeting_item_links.filter(l=>l.meeting_id===mid).map(l=>l.meeting_item_id));
-    return meeting_items.filter(mi=>linkIds.has(mi.id)).map(mi=>({...mi,task:byId.get(mi.task_id)})).filter(x=>x.task);
+  function itemsForMeeting(mid) {
+    const linkIds = new Set(meeting_item_links.filter(l => l.meeting_id === mid).map(l => l.meeting_item_id));
+    return meeting_items
+      .filter(mi => linkIds.has(mi.id))
+      .map(mi => ({ ...mi, task: byId.get(mi.task_id) }))
+      .filter(x => x.task);
   }
-  function openCount(mid){return itemsForMeeting(mid).filter(x=>!x.resolved&&x.task.status!=='done').length;}
 
-  const sortedMeetings=[...meetings].sort((a,b)=>b.date.localeCompare(a.date));
-  const cur=activeMeeting?meetings.find(m=>m.id===activeMeeting):sortedMeetings[0];
+  // All unresolved items across the whole project (agenda or follow-up not yet done)
+  function allOpenItems() {
+    return meeting_items
+      .map(mi => ({ ...mi, task: byId.get(mi.task_id) }))
+      .filter(x => x.task && x.task.project_id === projectId)
+      .filter(x => !x.resolved && x.task.status !== 'done');
+  }
 
-  const listHTML=sortedMeetings.map(m=>{
-    const open=openCount(m.id);
-    const future=m.date>new Date().toISOString().slice(0,10);
-    return `<div class="mtg-li ${cur&&m.id===cur.id?'on':''}" data-mtg="${m.id}">
+  function openCount(mid) {
+    return itemsForMeeting(mid).filter(x => !x.resolved && x.task.status !== 'done').length;
+  }
+
+  const sortedMeetings = [...meetings].sort((a, b) => b.date.localeCompare(a.date));
+  const cur = activeMeeting ? meetings.find(m => m.id === activeMeeting) : sortedMeetings[0];
+
+  // ── Meetings list HTML ─────────────────────────────────────────────
+  const listHTML = sortedMeetings.map(m => {
+    const open = openCount(m.id);
+    const future = m.date > new Date().toISOString().slice(0, 10);
+    return `<div class="mtg-li ${cur && m.id === cur.id ? 'on' : ''}" data-mtg="${m.id}">
       <div class="mtg-li-d"><i class="ti ti-calendar" style="font-size:11px"></i>${fmtLong(m.date)}
-        ${future?`<span class="chip" style="background:rgba(127,119,221,.08);color:#534AB7">Upcoming</span>`:''}</div>
+        ${future ? `<span class="chip" style="background:rgba(127,119,221,.08);color:#534AB7">Upcoming</span>` : ''}</div>
       <div class="mtg-li-t">${m.title}</div>
       <div class="mtg-li-m">
         <span><i class="ti ti-clock" style="font-size:11px;vertical-align:-2px"></i> ${m.duration_min}m</span>
-        ${open?`<span style="color:#BA7517">${open} open</span>`:'<span style="color:#1D9E75">All closed</span>'}
+        ${open ? `<span style="color:#BA7517">${open} open</span>` : '<span style="color:#1D9E75">All closed</span>'}
       </div>
     </div>`;
   }).join('');
 
-  let bodyHTML='<div class="empty" style="padding:60px;text-align:center">No meetings yet.</div>';
-  if(cur){
-    const items=itemsForMeeting(cur.id);
-    const agenda=items.filter(x=>x.kind==='agenda');
-    const follow=items.filter(x=>x.kind==='followup');
-    const att=(cur.attendee_ids||[]).map(id=>people.find(p=>p.id===id)).filter(Boolean);
-    const openA=agenda.filter(x=>!(x.resolved||x.task.status==='done')).length;
-    const openF=follow.filter(x=>!(x.resolved||x.task.status==='done')).length;
+  // ── Open items backlog (in sidebar, below meetings list) ──────────
+  const openItems = allOpenItems();
+  const backlogHTML = openItems.length ? `
+    <div class="backlog-hd">
+      <span>Open items</span>
+      <span class="backlog-count">${openItems.length}</span>
+    </div>
+    ${openItems.map(x => {
+      const o = people.find(p => p.id === x.task.owner_id);
+      const inCurrent = cur && itemsForMeeting(cur.id).some(i => i.id === x.id);
+      return `<div class="backlog-item" data-item="${x.id}">
+        <div class="backlog-item-title">
+          <i class="ti ti-${x.kind === 'agenda' ? 'message-circle' : 'arrow-forward'}"
+             style="font-size:11px;color:${x.kind === 'agenda' ? '#378ADD' : '#D4716A'};flex-shrink:0"></i>
+          <span>${x.task.name}</span>
+        </div>
+        <div class="backlog-item-meta">
+          ${o ? `<div class="av" style="width:16px;height:16px;font-size:7px;background:${o.color}">${o.initials}</div>` : ''}
+          ${x.task.end_date ? `<span class="${isOverdue(x.task) ? 'over' : ''}">${fmt(x.task.end_date)}</span>` : ''}
+          ${cur && !inCurrent
+            ? `<button class="backlog-add" data-item="${x.id}" data-meeting="${cur.id}">Add to meeting</button>`
+            : cur && inCurrent ? `<span style="color:#1D9E75;font-size:10px">In this meeting</span>` : ''}
+        </div>
+      </div>`;
+    }).join('')}
+  ` : '';
 
-    const itemHTML=x=>{
-      const t=x.task,o=people.find(p=>p.id===t.owner_id);
-      const done=x.resolved||t.status==='done';
-      const cnd=noDate(t,people),over=isOverdue(t);
-      const others=meeting_item_links.filter(l=>l.meeting_item_id===x.id&&l.meeting_id!==cur.id).length;
-      return `<div class="item" data-task="${t.id}">
-        <i class="ti ti-${done?'circle-check':'circle'} ck" style="color:${done?'#1D9E75':'#9CA3AF'}"></i>
+  // ── Meeting body ──────────────────────────────────────────────────
+  let bodyHTML = '<div class="empty" style="padding:60px;text-align:center;color:#9CA3AF">No meeting selected. Create one from the top-right.</div>';
+
+  if (cur) {
+    const items = itemsForMeeting(cur.id);
+    const agenda = items.filter(x => x.kind === 'agenda');
+    const follow = items.filter(x => x.kind === 'followup');
+    const openA = agenda.filter(x => !(x.resolved || x.task.status === 'done')).length;
+    const openF = follow.filter(x => !(x.resolved || x.task.status === 'done')).length;
+
+    const OWNER_OPTS = (selectedId) => {
+      const blank = `<option value="" ${!selectedId ? 'selected' : ''}>Unassigned</option>`;
+      const opts = people.map(p =>
+        `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${p.name}${p.is_client ? ' (client)' : ''}</option>`
+      ).join('');
+      return blank + opts;
+    };
+
+    const itemHTML = (x) => {
+      const t = x.task;
+      const o = people.find(p => p.id === t.owner_id);
+      const done = x.resolved || t.status === 'done';
+      const over = isOverdue(t);
+      const others = meeting_item_links.filter(l => l.meeting_item_id === x.id && l.meeting_id !== cur.id).length;
+      const iconClr = x.kind === 'agenda' ? '#378ADD' : '#D4716A';
+      const iconTi  = x.kind === 'agenda' ? 'message-circle' : 'arrow-forward';
+
+      return `<div class="item" data-item="${x.id}" data-task="${t.id}" data-kind="${x.kind}">
+        <div class="item-check-wrap">
+          <i class="ti ti-${done ? 'circle-check' : 'circle'} ck item-check" data-item="${x.id}"
+             style="color:${done ? '#1D9E75' : '#9CA3AF'};cursor:pointer" title="Mark ${done ? 'not done' : 'done'}"></i>
+        </div>
         <div class="item-b">
-          <div class="item-t ${done?'done':''}">${t.name}</div>
+          <input class="item-name-in" data-item="${x.id}" value="${(t.name||'').replace(/"/g,'&quot;')}"
+                 placeholder="Untitled" style="border:0;outline:0;background:transparent;
+                 font-size:12.5px;line-height:1.4;font-family:inherit;width:100%;
+                 color:${done ? '#9CA3AF' : '#1A1A22'};${done ? 'text-decoration:line-through' : ''}">
           <div class="item-m">
-            ${o?`<div class="av" style="width:17px;height:17px;font-size:7px;background:${o.color}">${o.initials}</div><span>${o.name}</span>`:''}
-            ${isClient(t,people)?`<span class="chip" style="background:rgba(186,117,23,.12);color:#854F0B"><i class="ti ti-user-star"></i>Client</span>`:''}
-            ${cnd?`<span style="color:#E24B4A;font-weight:500"><i class="ti ti-alert-triangle" style="font-size:11px"></i> No due date</span>`
-                 :t.end_date?`<span style="color:${over?'#E24B4A':'#9CA3AF'}">${fmt(t.end_date)}</span>`:''}
-            ${x.carried_from?`<span class="carry"><i class="ti ti-arrow-forward" style="font-size:9px"></i>Carried forward</span>`:''}
-            ${others?`<span><i class="ti ti-link" style="font-size:11px;vertical-align:-1px"></i> ${others} other meeting${others>1?'s':''}</span>`:''}
+            <select class="item-owner" data-item="${x.id}" style="border:0;outline:0;background:transparent;font-size:10.5px;color:#6B7280;cursor:pointer;padding:1px 3px;border-radius:4px">
+              ${OWNER_OPTS(t.owner_id)}
+            </select>
+            ${isClient(t, people) ? `<span class="chip" style="background:rgba(186,117,23,.12);color:#854F0B"><i class="ti ti-user-star"></i>Client</span>` : ''}
+            <input type="date" class="item-due" data-item="${x.id}" value="${t.end_date || ''}"
+                   style="border:0;outline:0;background:transparent;font-size:10.5px;color:${over ? '#E24B4A' : '#9CA3AF'};font-family:monospace;cursor:pointer;padding:1px 3px;border-radius:4px">
+            ${others ? `<span><i class="ti ti-link" style="font-size:11px;vertical-align:-1px"></i>${others} other meeting${others > 1 ? 's' : ''}</span>` : ''}
+            <span class="item-actions">
+              <button class="item-toggle" data-item="${x.id}"
+                      title="Convert to ${x.kind === 'agenda' ? 'follow-up' : 'agenda'}"
+                      style="border:0;background:transparent;color:#9CA3AF;font-size:10px;cursor:pointer;padding:2px 6px;border-radius:4px">
+                <i class="ti ti-arrows-exchange" style="font-size:11px"></i> → ${x.kind === 'agenda' ? 'follow-up' : 'agenda'}
+              </button>
+              <button class="item-delete" data-item="${x.id}"
+                      style="border:0;background:transparent;color:#C4C9D4;font-size:10px;cursor:pointer;padding:2px 6px;border-radius:4px" title="Remove from meeting">
+                <i class="ti ti-x" style="font-size:11px"></i>
+              </button>
+            </span>
           </div>
         </div>
       </div>`;
     };
 
-    bodyHTML=`
-    <div class="mtg-head">
-      <div class="mtg-title">${cur.title}</div>
-      <div class="mtg-facts">
-        <div><i class="ti ti-calendar"></i>${fmtLong(cur.date)}</div>
-        <div><i class="ti ti-clock"></i>${cur.start_time}–${endTime(cur)} · ${cur.duration_min}m</div>
-        <div><i class="ti ti-flag-3"></i>Wrap-up from ${wrapTime(cur)}</div>
-        <div style="display:flex;align-items:center;gap:4px"><i class="ti ti-users"></i>
-          ${att.map(p=>`<div class="av" style="width:20px;height:20px;font-size:8px;background:${p.color}">${p.initials}</div>`).join('')}
+    bodyHTML = `
+      <div class="mtg-head">
+        <input class="mtg-title-in" value="${cur.title.replace(/"/g,'&quot;')}"
+               style="border:0;outline:0;background:transparent;font-size:16px;font-weight:500;margin-bottom:8px;width:100%;font-family:inherit">
+        <div class="mtg-facts">
+          <div><i class="ti ti-calendar"></i>
+            <input type="date" class="mtg-date-in" value="${cur.date}"
+                   style="border:0;outline:0;background:transparent;font-size:11px;color:#6B7280;font-family:monospace">
+          </div>
+          <div><i class="ti ti-clock"></i>${cur.start_time}–${endTime(cur)} · ${cur.duration_min}m</div>
         </div>
       </div>
-      ${cur.notes?`<p style="font-size:12px;color:#6B7280;line-height:1.6;margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,.06)">${cur.notes}</p>`:''}
-    </div>
-    <div class="sec">
-      <div class="sech"><i class="ti ti-message-circle" style="font-size:14px;color:#378ADD"></i>
-        <span class="secname">Agenda</span>
-        <span class="secbadge" style="background:${openA?'rgba(55,138,221,.12)':'rgba(29,158,117,.1)'};color:${openA?'#185FA5':'#1D9E75'}">${openA?openA+' open':'all covered'}</span>
+
+      <div class="sec">
+        <div class="sech">
+          <i class="ti ti-message-circle" style="font-size:14px;color:#378ADD"></i>
+          <span class="secname">Agenda</span>
+          <span class="secbadge" style="background:${openA ? 'rgba(55,138,221,.12)' : 'rgba(29,158,117,.1)'};color:${openA ? '#185FA5' : '#1D9E75'}">
+            ${openA ? openA + ' open' : 'all covered'}
+          </span>
+        </div>
+        ${agenda.length ? agenda.map(itemHTML).join('') : '<div class="empty" style="padding:16px;color:#9CA3AF;font-size:12px">No agenda items yet.</div>'}
+        <div class="secadd" id="add-agenda-btn"><i class="ti ti-plus" style="font-size:12px"></i>Add agenda item</div>
       </div>
-      ${agenda.length?agenda.map(itemHTML).join(''):'<div class="empty">No agenda items yet.</div>'}
-      <div class="secadd" id="add-agenda-btn"><i class="ti ti-plus" style="font-size:12px"></i>Add agenda item</div>
-    </div>
-    <div class="sec">
-      <div class="sech"><i class="ti ti-arrow-forward" style="font-size:14px;color:#D4716A"></i>
-        <span class="secname">Actions &amp; follow-ups</span>
-        <span class="secbadge" style="background:${openF?'rgba(212,113,106,.14)':'rgba(29,158,117,.1)'};color:${openF?'#993C1D':'#1D9E75'}">${openF?openF+' open':'all closed'}</span>
+
+      <div class="sec">
+        <div class="sech">
+          <i class="ti ti-arrow-forward" style="font-size:14px;color:#D4716A"></i>
+          <span class="secname">Actions &amp; follow-ups</span>
+          <span class="secbadge" style="background:${openF ? 'rgba(212,113,106,.14)' : 'rgba(29,158,117,.1)'};color:${openF ? '#993C1D' : '#1D9E75'}">
+            ${openF ? openF + ' open' : 'all closed'}
+          </span>
+        </div>
+        ${follow.length ? follow.map(itemHTML).join('') : '<div class="empty" style="padding:16px;color:#9CA3AF;font-size:12px">No follow-ups captured.</div>'}
+        <div class="secadd" id="add-followup-btn"><i class="ti ti-plus" style="font-size:12px"></i>Capture follow-up</div>
       </div>
-      ${follow.length?follow.map(itemHTML).join(''):'<div class="empty">No follow-ups captured.</div>'}
-      <div class="secadd" id="add-followup-btn"><i class="ti ti-plus" style="font-size:12px"></i>Capture follow-up</div>
-    </div>`;
+    `;
   }
 
-  mount.innerHTML=`<div class="mtg-wrap"><div class="mtg-list">${listHTML}</div><div class="mtg-body">${bodyHTML}</div></div>`;
-  mount.querySelectorAll('[data-mtg]').forEach(n=>n.addEventListener('click',()=>onSelectMeeting(n.dataset.mtg)));
-  mount.querySelector('#add-agenda-btn')?.addEventListener('click', ()=>onAddAgenda?.());
-  mount.querySelector('#add-followup-btn')?.addEventListener('click', ()=>onAddFollowup?.());
-  mount.querySelectorAll('.item[data-task]').forEach(n=>n.addEventListener('click',()=>onSelectTask(n.dataset.task)));
+  mount.innerHTML = `<div class="mtg-wrap">
+    <div class="mtg-list">
+      ${listHTML}
+      ${backlogHTML}
+    </div>
+    <div class="mtg-body">${bodyHTML}</div>
+  </div>`;
+
+  // ── Wire up events ────────────────────────────────────────────────
+  mount.querySelectorAll('[data-mtg]').forEach(n => n.addEventListener('click', () => onSelectMeeting(n.dataset.mtg)));
+
+  // Add agenda / follow-up
+  mount.querySelector('#add-agenda-btn')?.addEventListener('click', () => onAddAgenda?.());
+  mount.querySelector('#add-followup-btn')?.addEventListener('click', () => onAddFollowup?.());
+
+  // Backlog: add existing item to current meeting
+  mount.querySelectorAll('.backlog-add').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const itemId = btn.dataset.item;
+      const meetingId = btn.dataset.meeting;
+      // Check not already linked
+      const exists = meeting_item_links.some(l => l.meeting_item_id === itemId && l.meeting_id === meetingId);
+      if (!exists) {
+        db.insert('meeting_item_links', { meeting_item_id: itemId, meeting_id: meetingId });
+        onRerender?.();
+      }
+    });
+  });
+
+  // Clicking a backlog item selects that task
+  mount.querySelectorAll('.backlog-item').forEach(el => {
+    el.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      const item = meeting_items.find(mi => mi.id === el.dataset.item);
+      if (item) onSelectTask(item.task_id);
+    });
+  });
+
+  // Item checkbox toggle
+  mount.querySelectorAll('.item-check').forEach(el => {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      const itemId = el.dataset.item;
+      const item = meeting_items.find(mi => mi.id === itemId);
+      if (!item) return;
+      const task = byId.get(item.task_id);
+      if (!task) return;
+      const done = task.status === 'done';
+      db.update('tasks', task.id, { status: done ? 'todo' : 'done', progress: done ? 0 : 100 });
+      db.update('meeting_items', item.id, { resolved: !done });
+      onRerender?.();
+    });
+  });
+
+  // Item name inline edit
+  mount.querySelectorAll('.item-name-in').forEach(el => {
+    el.addEventListener('blur', () => {
+      const item = meeting_items.find(mi => mi.id === el.dataset.item);
+      if (!item) return;
+      const task = byId.get(item.task_id);
+      if (task && (task.name || '') !== el.value) {
+        db.update('tasks', task.id, { name: el.value });
+      }
+    });
+    el.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); el.blur(); }
+    });
+  });
+
+  // Item owner change
+  mount.querySelectorAll('.item-owner').forEach(el => {
+    el.addEventListener('change', () => {
+      const item = meeting_items.find(mi => mi.id === el.dataset.item);
+      if (!item) return;
+      db.update('tasks', item.task_id, { owner_id: el.value || null });
+      onRerender?.();
+    });
+  });
+
+  // Item due date change
+  mount.querySelectorAll('.item-due').forEach(el => {
+    el.addEventListener('change', () => {
+      const item = meeting_items.find(mi => mi.id === el.dataset.item);
+      if (!item) return;
+      db.update('tasks', item.task_id, { end_date: el.value || null });
+      onRerender?.();
+    });
+  });
+
+  // Toggle agenda ↔ follow-up
+  mount.querySelectorAll('.item-toggle').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const item = meeting_items.find(mi => mi.id === btn.dataset.item);
+      if (!item) return;
+      const newKind = item.kind === 'agenda' ? 'followup' : 'agenda';
+      db.update('meeting_items', item.id, { kind: newKind });
+      // Also change the underlying task's type to match
+      db.update('tasks', item.task_id, { type: newKind });
+      onRerender?.();
+    });
+  });
+
+  // Remove item from meeting (unlink, not delete)
+  mount.querySelectorAll('.item-delete').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (!cur) return;
+      const itemId = btn.dataset.item;
+      const link = meeting_item_links.find(l => l.meeting_item_id === itemId && l.meeting_id === cur.id);
+      if (link) db.remove('meeting_item_links', link.id);
+      onRerender?.();
+    });
+  });
+
+  // Meeting title / date edit
+  const titleIn = mount.querySelector('.mtg-title-in');
+  if (titleIn) {
+    titleIn.addEventListener('blur', () => {
+      if (cur && cur.title !== titleIn.value) db.update('meetings', cur.id, { title: titleIn.value });
+    });
+    titleIn.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); titleIn.blur(); } });
+  }
+  const dateIn = mount.querySelector('.mtg-date-in');
+  if (dateIn) {
+    dateIn.addEventListener('change', () => {
+      if (cur && cur.date !== dateIn.value) db.update('meetings', cur.id, { date: dateIn.value });
+    });
+  }
+
+  // Item body click → select the underlying task
+  mount.querySelectorAll('.item[data-task]').forEach(n => {
+    n.addEventListener('click', e => {
+      if (e.target.closest('button, input, select, .item-check')) return;
+      onSelectTask(n.dataset.task);
+    });
+  });
 }
