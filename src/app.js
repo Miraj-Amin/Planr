@@ -119,8 +119,7 @@ function toolsHTML() {
     </select>
     <button class="btn ghost ${A.hideAgenda?'on':''}" id="agendaTgl">
       <i class="ti ti-message-circle" style="font-size:10px"></i>${A.hideAgenda?'Agenda hidden':'Show agenda'}</button>`;
-  if (A.view === 'focus') return [1,7,30].map(n =>
-    `<button class="btn ghost ${A.horizon===n?'on':''}" data-hz="${n}">${n===1?'Today':n===7?'This week':'This month'}</button>`).join('');
+  if (A.view === 'focus') return '';
   if (A.view === 'meetings') return `
     <button class="btn ghost" id="addMtgBtn"><i class="ti ti-plus" style="font-size:10px"></i>New meeting</button>`;
   return '';
@@ -203,9 +202,15 @@ function renderApp() {
   // ── FOCUS ─────────────────────────────────────────────────────────────────
   if (A.view === 'focus') {
     mount.innerHTML = `<div id="focusMount" style="flex:1;display:flex;flex-direction:column;overflow:hidden"></div>`;
-    renderFocus({ mount:document.getElementById('focusMount'), tasks:db.all('tasks'),
-      people:people(), projects:db.all('projects'), horizon:A.horizon,
-      onSelect:id=>{ A.sel=A.sel===id?null:id; renderApp(); } });
+    renderFocus({
+      mount: document.getElementById('focusMount'),
+      tasks: projTasks(),
+      people: people(),
+      projects: db.all('projects'),
+      db,
+      onSelect: id => { A.sel = A.sel === id ? null : id; renderApp(); },
+      onRerender: () => renderApp(),
+    });
     document.getElementById('mainBtn')?.addEventListener('click', () =>
       newTaskForm(db, A.project, {}, () => renderApp()));
     return;

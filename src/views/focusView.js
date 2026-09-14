@@ -1,70 +1,212 @@
-// focusView.js — Horizon view: overdue, client no-date, due within N days.
-import { fmt } from '../lib/dates.js';
+// focusView.js — Focus view: overdue+today, this week, next week, later.
+// - Shows only LEAF tasks (no children) — since parents are rollup rows in Plan.
+// - Groups by the task's own start_date/end_date (child's date, not parent's).
+// - Order within groups is user-managed via focus_order (nullable). Reordering
+//   here does NOT change sort_order on the Plan grid.
+// - Parent breadcrumb shown for context.
 
-const TODAY=new Date(2026,8,13);
-const pd=s=>s?new Date(s+'T00:00:00'):null;
-const EFFORT=[{v:15,l:'15m'},{v:30,l:'30m'},{v:60,l:'1h'},{v:120,l:'2h'},{v:240,l:'4h'},{v:480,l:'1d'}];
-const effLabel=m=>{if(!m)return'';const e=EFFORT.find(x=>x.v===m);if(e)return e.l;return m>=480?(m/480)+'d':m>=60?(m/60)+'h':m+'m';};
-const STATUSES={todo:'#A0A7B4','in-progress':'#7F77DD',blocked:'#E24B4A',review:'#BA7517',done:'#1D9E75'};
-const STATUS_L={todo:'To do','in-progress':'In progress',blocked:'Blocked',review:'Review',done:'Done'};
-const TYPES={phase:'#7F77DD',task:'#6B7280',milestone:'#BA7517',deliverable:'#1D9E75',agenda:'#378ADD',followup:'#D4716A'};
-const TYPE_I={phase:'ti-layers-intersect',task:'ti-square',milestone:'ti-diamond',deliverable:'ti-package',agenda:'ti-message-circle',followup:'ti-arrow-forward'};
+import { fmt, stripTime } from '../lib/dates.js';
 
-const isClientOwned=(t,people)=>{const o=people.find(p=>p.id===t.owner_id);return !!(o&&o.is_client);};
-const isOverdue=t=>{const d=pd(t.end_date);return !!d&&d<TODAY&&t.status!=='done';};
-const isSoon=t=>{const d=pd(t.end_date);if(!d||t.status==='done')return false;const k=Math.round((d-TODAY)/86400000);return k>=0&&k<=3;};
-const clientNoDate=(t,people)=>isClientOwned(t,people)&&!t.end_date&&t.status!=='done';
-const inHorizon=(t,n)=>{const d=pd(t.end_date);if(!d)return false;const k=Math.round((d-TODAY)/86400000);return k>=0&&k<=n;};
+const pd = s => s ? new Date(s + 'T00:00:00') : null;
+const daysBetween = (a, b) => Math.round((stripTime(a) - stripTime(b)) / 86400000);
 
-function rowHTML(t,people,projects){
-  const o=people.find(p=>p.id===t.owner_id);
-  const over=isOverdue(t),cnd=clientNoDate(t,people),soon=isSoon(t);
-  const strip=over?'#E24B4A':cnd?'#BA7517':t.status==='in-progress'?'#7F77DD':'transparent';
-  const dueCol=over||cnd?'#E24B4A':soon?'#BA7517':'#A0A7B4';
-  const proj=projects.find(p=>p.id===t.project_id);
-  const stColor=STATUSES[t.status]||'#A0A7B4';
-  return `<div class="row" data-task="${t.id}">
-    <div class="strip" style="background:${strip}"></div>
-    <div style="width:22px;flex-shrink:0"></div>
-    <div class="dot" style="background:${over?'#E24B4A':stColor}"></div>
-    <div class="tico" style="background:${(TYPES[t.type]||'#888')}1a"><i class="ti ${TYPE_I[t.type]||'ti-square'}" style="color:${TYPES[t.type]||'#888'}"></i></div>
-    <div class="rname">
-      <span class="t">${t.name}</span>
-      ${isClientOwned(t,people)?`<span class="chip" style="background:rgba(186,117,23,.12);color:#854F0B"><i class="ti ti-user-star"></i>Client</span>`:''}
-      ${t.flagged?`<i class="ti ti-message-circle" style="font-size:12px;color:#BA7517;flex-shrink:0"></i>`:''}
-      ${proj?`<span style="font-size:10px;color:#9CA3AF;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px;flex-shrink:1">${proj.name}</span>`:''}
+const EFFORT = [
+  { v:15,l:'15m' },{ v:30,l:'30m' },{ v:60,l:'1h' },
+  { v:120,l:'2h' },{ v:240,l:'4h' },{ v:480,l:'1d' },
+];
+const effLabel = m => {
+  if (!m) return '';
+  const e = EFFORT.find(x => x.v === m);
+  if (e) return e.l;
+  return m >= 480 ? (m/480) + 'd' : m >= 60 ? (m/60) + 'h' : m + 'm';
+};
+const STATUSES = { todo:'#A0A7B4','in-progress':'#7F77DD',blocked:'#E24B4A',review:'#BA7517',done:'#1D9E75' };
+const STATUS_L = { todo:'To do','in-progress':'In progress',blocked:'Blocked',review:'Review',done:'Done' };
+const TYPES = { phase:'#7F77DD',task:'#6B7280',milestone:'#BA7517',deliverable:'#1D9E75',agenda:'#378ADD',followup:'#D4716A',meeting:'#534AB7' };
+const TYPE_I = { phase:'ti-layers-intersect',task:'ti-square',milestone:'ti-diamond',deliverable:'ti-package',agenda:'ti-message-circle',followup:'ti-arrow-forward',meeting:'ti-calendar-event' };
+
+// Which date determines the group? Prefer end_date (due), fall back to start_date.
+const groupingDate = t => t.end_date || t.start_date || null;
+
+function classify(t, today) {
+  const d = pd(groupingDate(t));
+  if (!d) return 'later';  // No date → goes into Later so user can still reorder them
+  const delta = daysBetween(d, today);
+  if (delta < 0 && t.status !== 'done') return 'overdue';
+  if (delta <= 0) return 'today';          // due today
+  // Week boundary: end of this week (Sunday-based; use ISO Mon-Sun so week goes Mon→Sun)
+  const dow = today.getDay();               // 0=Sun...6=Sat
+  const daysUntilEndOfWeek = dow === 0 ? 0 : (7 - dow);  // days until Sunday
+  if (delta <= daysUntilEndOfWeek) return 'this-week';
+  if (delta <= daysUntilEndOfWeek + 7) return 'next-week';
+  return 'later';
+}
+
+const GROUPS = [
+  { id: 'overdue-today', label: 'Overdue & today', ids: ['overdue','today'], accent: '#E24B4A' },
+  { id: 'this-week',     label: 'This week',        ids: ['this-week'],     accent: '#BA7517' },
+  { id: 'next-week',     label: 'Next week',        ids: ['next-week'],     accent: '#7F77DD' },
+  { id: 'later',         label: 'Later',            ids: ['later'],         accent: '#6B7280' },
+];
+
+function rowHTML(t, people, projects, taskById, isFirst, isLast) {
+  const o = people.find(p => p.id === t.owner_id);
+  const proj = projects.find(p => p.id === t.project_id);
+  const parent = t.parent_id ? taskById.get(t.parent_id) : null;
+  const stColor = STATUSES[t.status] || '#A0A7B4';
+  const overdue = pd(groupingDate(t)) && pd(groupingDate(t)) < new Date() && t.status !== 'done';
+  const dueCol = overdue ? '#E24B4A' : '#6B7280';
+
+  // Build breadcrumb up to root parent (for context in the focus row)
+  const crumbs = [];
+  let cur = parent;
+  while (cur) {
+    crumbs.unshift(cur.name);
+    cur = cur.parent_id ? taskById.get(cur.parent_id) : null;
+  }
+  const crumbHTML = crumbs.length
+    ? `<div class="foc-crumb">${crumbs.join(' › ')}</div>`
+    : '';
+
+  return `<div class="foc-row" data-task="${t.id}">
+    <div class="foc-order">
+      <button class="foc-up"   data-task="${t.id}" ${isFirst?'disabled':''} title="Move up">
+        <i class="ti ti-chevron-up"></i>
+      </button>
+      <button class="foc-down" data-task="${t.id}" ${isLast?'disabled':''} title="Move down">
+        <i class="ti ti-chevron-down"></i>
+      </button>
     </div>
-    <div class="rcol rstat"><span class="stat" style="background:${stColor}1a;color:${stColor}">${STATUS_L[t.status]||t.status}</span></div>
-    <div class="rcol reff">${effLabel(t.effort_min)}</div>
-    <div class="rcol rown">${o?`<div class="av" style="background:${o.color};width:25px;height:25px;font-size:9px">${o.initials}</div>`:''}</div>
-    <div class="rcol rdue" style="color:${dueCol}">${cnd?'No date':t.end_date?fmt(t.end_date):'—'}</div>
+    <div class="foc-body">
+      ${crumbHTML}
+      <div class="foc-title-line">
+        <div class="tico" style="background:${(TYPES[t.type]||'#888')}1a"><i class="ti ${TYPE_I[t.type]||'ti-square'}" style="color:${TYPES[t.type]||'#888'}"></i></div>
+        <div class="foc-name">${t.name}</div>
+        ${proj ? `<span class="foc-proj">${proj.name}</span>` : ''}
+      </div>
+      <div class="foc-meta">
+        <span class="stat" style="background:${stColor}1a;color:${stColor}">${STATUS_L[t.status] || t.status}</span>
+        ${o ? `<div class="av" style="background:${o.color};width:20px;height:20px;font-size:8px">${o.initials}</div><span style="font-size:11px;color:#6B7280">${o.name}</span>` : ''}
+        ${t.effort_min ? `<span style="font-size:11px;color:#9CA3AF;font-family:monospace">${effLabel(t.effort_min)}</span>` : ''}
+        <span style="font-size:11px;color:${dueCol};font-family:monospace;margin-left:auto">
+          ${groupingDate(t) ? fmt(groupingDate(t)) : 'No date'}
+        </span>
+      </div>
+    </div>
   </div>`;
 }
 
-export function renderFocus({mount,tasks,people,projects,horizon,onSelect}){
-  const n=horizon||7;
-  const all=tasks.filter(t=>t.type!=='phase'&&t.status!=='done');
-  const overdue=all.filter(isOverdue);
-  const noDate=all.filter(t=>clientNoDate(t,people));
-  const due=all.filter(t=>!isOverdue(t)&&inHorizon(t,n));
-  const started=all.filter(t=>!isOverdue(t)&&!inHorizon(t,n)&&t.status==='in-progress'&&!clientNoDate(t,people));
+export function renderFocus({ mount, tasks, people, projects, db, onSelect, onRerender }) {
+  const today = new Date();
+  const taskById = new Map(tasks.map(t => [t.id, t]));
 
-  const grp=(title,items,cls='')=>items.length?
-    `<div class="grp ${cls}"><span class="grpname">${title}</span><span class="grpcount">${items.length}</span></div>`
-    +items.map(t=>rowHTML(t,people,projects)).join(''):'';
+  // Build set of parents (tasks that have children) so we can filter to leaves only
+  const parentIds = new Set();
+  tasks.forEach(t => { if (t.parent_id) parentIds.add(t.parent_id); });
 
-  const total=overdue.length+due.length+noDate.length;
-  mount.innerHTML=`
-    <div class="banner" style="background:rgba(127,119,221,.06);border-bottom-color:rgba(127,119,221,.15);color:#6B7280">
-      <i class="ti ti-target" style="color:#7F77DD"></i>
-      <span><b>${total} item${total===1?'':'s'}</b> need attention ${n===1?'today':n===7?'this week':'this month'}.</span>
-    </div>
-    <div class="scroll">
-      ${grp('Overdue',overdue,'danger')}
-      ${grp('Client-owned · no agreed date',noDate,'danger')}
-      ${grp(n===1?'Due today':`Due within ${n} days`,due)}
-      ${grp('In progress · beyond horizon',started)}
-      ${total===0&&started.length===0?'<div style="padding:60px;text-align:center;color:#9CA3AF;font-size:13px">Nothing due in this window.</div>':''}
+  // Filter: leaves only, exclude done, exclude phases and meeting/agenda/followup shells
+  // (Agenda and follow-up items become tasks in the plan, so if they're leaves they show)
+  const candidates = tasks.filter(t =>
+    !parentIds.has(t.id) &&           // no children = leaf
+    t.status !== 'done' &&
+    t.type !== 'phase' &&
+    t.type !== 'meeting'              // meeting shells aren't work
+  );
+
+  // Classify
+  const buckets = { 'overdue-today': [], 'this-week': [], 'next-week': [], 'later': [] };
+  candidates.forEach(t => {
+    const c = classify(t, today);
+    const groupId = (c === 'overdue' || c === 'today') ? 'overdue-today' : c;
+    buckets[groupId].push(t);
+  });
+
+  // Sort each bucket: user's focus_order first (ascending), then by grouping date, then by name
+  Object.values(buckets).forEach(list => {
+    list.sort((a, b) => {
+      const ao = a.focus_order, bo = b.focus_order;
+      if (ao != null && bo != null) return ao - bo;
+      if (ao != null) return -1;
+      if (bo != null) return 1;
+      const ad = groupingDate(a), bd = groupingDate(b);
+      if (ad && bd) return ad.localeCompare(bd);
+      if (ad) return -1;
+      if (bd) return 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+  });
+
+  const total = Object.values(buckets).reduce((n, l) => n + l.length, 0);
+
+  const groupHTML = ({ id, label, accent }) => {
+    const items = buckets[id];
+    if (!items.length) return '';
+    const rows = items.map((t, i) => rowHTML(t, people, projects, taskById, i === 0, i === items.length - 1)).join('');
+    return `<div class="foc-group">
+      <div class="foc-group-head">
+        <span class="foc-group-dot" style="background:${accent}"></span>
+        <span class="foc-group-name">${label}</span>
+        <span class="foc-group-count">${items.length}</span>
+      </div>
+      <div class="foc-group-rows" data-group="${id}">${rows}</div>
     </div>`;
-  mount.querySelectorAll('.row').forEach(r=>r.addEventListener('click',()=>onSelect(r.dataset.task)));
+  };
+
+  mount.innerHTML = `
+    <div class="foc-banner">
+      <i class="ti ti-target" style="color:#7F77DD;font-size:14px"></i>
+      <span><b>${total} item${total === 1 ? '' : 's'}</b> in focus.</span>
+      <span style="margin-left:auto;color:#9CA3AF">Ordering here doesn't change your Plan.</span>
+    </div>
+    <div class="foc-scroll">
+      ${GROUPS.map(groupHTML).join('')}
+      ${total === 0 ? '<div style="padding:60px;text-align:center;color:#9CA3AF;font-size:13px">Nothing to focus on right now.</div>' : ''}
+    </div>
+  `;
+
+  // ── Reorder within a group ──────────────────────────────────────────
+  function move(taskId, direction) {
+    // Find which bucket the task is in
+    for (const [groupId, list] of Object.entries(buckets)) {
+      const idx = list.findIndex(t => t.id === taskId);
+      if (idx === -1) continue;
+      const newIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (newIdx < 0 || newIdx >= list.length) return;
+
+      // Swap them
+      const [a, b] = [list[idx], list[newIdx]];
+      const reordered = [...list];
+      reordered[idx] = b;
+      reordered[newIdx] = a;
+
+      // Renumber focus_order for the whole bucket from 0 so gaps close cleanly
+      reordered.forEach((t, i) => {
+        db.update('tasks', t.id, { focus_order: i });
+      });
+
+      onRerender?.();
+      return;
+    }
+  }
+
+  mount.querySelectorAll('.foc-up').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      move(btn.dataset.task, 'up');
+    });
+  });
+  mount.querySelectorAll('.foc-down').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      move(btn.dataset.task, 'down');
+    });
+  });
+
+  // ── Click row → select task ─────────────────────────────────────────
+  mount.querySelectorAll('.foc-row').forEach(r => {
+    r.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      onSelect(r.dataset.task);
+    });
+  });
 }

@@ -186,11 +186,39 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
   const channelOptions = [...new Set(['Email', 'Meeting', ...existingChannels])]
     .map(c => ({ value: c, label: c }));
 
+  // Related-to picker: any project task that isn't itself an agenda/followup
+  // (Agenda + follow-up items already live under meetings — don't nest them further)
+  const parentCandidates = db.all('tasks')
+    .filter(t =>
+      t.project_id === projectId &&
+      t.type !== 'agenda' &&
+      t.type !== 'followup'
+    )
+    .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0));
+
+  // Build breadcrumb labels for context (e.g. "Phase 1 › Requirements")
+  const taskById = new Map(parentCandidates.map(t => [t.id, t]));
+  const breadcrumb = (t) => {
+    const parts = [t.name];
+    let cur = t;
+    while (cur && cur.parent_id) {
+      const p = taskById.get(cur.parent_id) || db.get('tasks', cur.parent_id);
+      if (!p) break;
+      parts.unshift(p.name);
+      cur = p;
+    }
+    return parts.join(' › ');
+  };
+  const parentOptions = parentCandidates.map(t => ({ value: t.id, label: breadcrumb(t) }));
+
   openModal({
     title: isFollowup ? 'Capture follow-up' : 'Add agenda item',
     fields: [
       { key:'name',     label:isFollowup?'Action / follow-up':'Agenda topic',
         type:'text', required:true, placeholder:isFollowup?'What was agreed?':'What needs to be discussed?' },
+      { key:'parent_id', label:'Related task', type:'select', placeholder:'None — top-level item',
+        options: parentOptions,
+        hint:'If related to an existing task, it will appear nested under that task in the Plan.' },
       { key:'owner_id', label:'Owner', type:'select', required:isFollowup,
         placeholder:isFollowup?'Who owns this?':'Optional owner',
         options:people.map(p=>({value:p.id,label:p.name+(p.is_client?' (client)':'')})) },
@@ -217,6 +245,7 @@ export function newMeetingItemForm(db, supabase, projectId, meetingId, kind, onD
         end_date: data.end_date || null,
         start_date: new Date().toISOString().slice(0, 10),
         effort_min: 0, priority: 'normal', progress: 0, flagged: true,
+        parent_id: data.parent_id || null,
         sort_order: (Date.now() % 2000000000),
       };
       const { data: task, error: tErr } = await supabase.from('tasks').insert(taskRec).select().single();
