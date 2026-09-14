@@ -63,32 +63,7 @@ export function renderMeetings({
     </div>`;
   }).join('');
 
-  // ── Open items backlog (in sidebar, below meetings list) ──────────
-  const openItems = allOpenItems();
-  const backlogHTML = openItems.length ? `
-    <div class="backlog-hd">
-      <span>Open items</span>
-      <span class="backlog-count">${openItems.length}</span>
-    </div>
-    ${openItems.map(x => {
-      const o = people.find(p => p.id === x.task.owner_id);
-      const inCurrent = cur && itemsForMeeting(cur.id).some(i => i.id === x.id);
-      return `<div class="backlog-item" data-item="${x.id}">
-        <div class="backlog-item-title">
-          <i class="ti ti-${x.kind === 'agenda' ? 'message-circle' : 'arrow-forward'}"
-             style="font-size:11px;color:${x.kind === 'agenda' ? '#378ADD' : '#D4716A'};flex-shrink:0"></i>
-          <span>${x.task.name}</span>
-        </div>
-        <div class="backlog-item-meta">
-          ${o ? `<div class="av" style="width:16px;height:16px;font-size:7px;background:${o.color}">${o.initials}</div>` : ''}
-          ${x.task.end_date ? `<span class="${isOverdue(x.task) ? 'over' : ''}">${fmt(x.task.end_date)}</span>` : ''}
-          ${cur && !inCurrent
-            ? `<button class="backlog-add" data-item="${x.id}" data-meeting="${cur.id}">Add to meeting</button>`
-            : cur && inCurrent ? `<span style="color:#1D9E75;font-size:10px">In this meeting</span>` : ''}
-        </div>
-      </div>`;
-    }).join('')}
-  ` : '';
+
 
   // ── Meeting body ──────────────────────────────────────────────────
   let bodyHTML = '<div class="empty" style="padding:60px;text-align:center;color:#9CA3AF">No meeting selected. Create one from the top-right.</div>';
@@ -136,14 +111,14 @@ export function renderMeetings({
                    style="border:0;outline:0;background:transparent;font-size:10.5px;color:${over ? '#E24B4A' : '#9CA3AF'};font-family:monospace;cursor:pointer;padding:1px 3px;border-radius:4px">
             ${others ? `<span><i class="ti ti-link" style="font-size:11px;vertical-align:-1px"></i>${others} other meeting${others > 1 ? 's' : ''}</span>` : ''}
             <span class="item-actions">
-              <button class="item-toggle" data-item="${x.id}"
-                      title="Convert to ${x.kind === 'agenda' ? 'follow-up' : 'agenda'}"
-                      style="border:0;background:transparent;color:#9CA3AF;font-size:10px;cursor:pointer;padding:2px 6px;border-radius:4px">
-                <i class="ti ti-arrows-exchange" style="font-size:11px"></i> → ${x.kind === 'agenda' ? 'follow-up' : 'agenda'}
-              </button>
+              <select class="item-kind" data-item="${x.id}" title="Change item type"
+                      style="border:.5px solid rgba(0,0,0,.15);background:#fff;color:${x.kind==='agenda' ? '#185FA5' : '#993C1D'};font-size:10px;cursor:pointer;padding:3px 6px;border-radius:6px;font-weight:500">
+                <option value="agenda"   ${x.kind==='agenda'   ? 'selected' : ''}>Agenda</option>
+                <option value="followup" ${x.kind==='followup' ? 'selected' : ''}>Action / follow-up</option>
+              </select>
               <button class="item-delete" data-item="${x.id}"
-                      style="border:0;background:transparent;color:#C4C9D4;font-size:10px;cursor:pointer;padding:2px 6px;border-radius:4px" title="Remove from meeting">
-                <i class="ti ti-x" style="font-size:11px"></i>
+                      style="border:0;background:transparent;color:#C4C9D4;font-size:12px;cursor:pointer;padding:3px 6px;border-radius:4px" title="Remove from meeting">
+                <i class="ti ti-x"></i> Remove
               </button>
             </span>
           </div>
@@ -187,13 +162,44 @@ export function renderMeetings({
         ${follow.length ? follow.map(itemHTML).join('') : '<div class="empty" style="padding:16px;color:#9CA3AF;font-size:12px">No follow-ups captured.</div>'}
         <div class="secadd" id="add-followup-btn"><i class="ti ti-plus" style="font-size:12px"></i>Capture follow-up</div>
       </div>
+
+      ${(() => {
+        // Open items from OTHER meetings — not already in this one
+        const inThisMeeting = new Set(items.map(i => i.id));
+        const backlog = allOpenItems().filter(x => !inThisMeeting.has(x.id));
+        if (!backlog.length) return '';
+        return `<div class="sec">
+          <div class="sech">
+            <i class="ti ti-inbox" style="font-size:14px;color:#7F77DD"></i>
+            <span class="secname">Open items from other meetings</span>
+            <span class="secbadge" style="background:rgba(127,119,221,.12);color:#3C3489">${backlog.length}</span>
+          </div>
+          ${backlog.map(x => {
+            // Reuse the same itemHTML so inline editing (type, owner, due, name, check) works
+            // Wrap it and add an "Add to this meeting" button on the right
+            // itemHTML normally includes an item-delete (unlink) button that only makes sense
+            // for items IN the current meeting. Strip it for backlog rows and add the "Add" button.
+            let h = itemHTML(x);
+            h = h.replace(/<button class="item-delete"[\s\S]*?<\/button>/, '');
+            h = h.replace(
+              '<span class="item-actions">',
+              `<span class="item-actions">
+                <button class="backlog-add-inline" data-item="${x.id}" data-meeting="${cur.id}"
+                        style="border:.5px solid #534AB7;background:transparent;color:#534AB7;font-size:10px;
+                               cursor:pointer;padding:3px 9px;border-radius:6px;font-weight:500;margin-right:4px">
+                  <i class="ti ti-plus" style="font-size:10px"></i> Add to this meeting
+                </button>`
+            );
+            return h;
+          }).join('')}
+        </div>`;
+      })()}
     `;
   }
 
   mount.innerHTML = `<div class="mtg-wrap">
     <div class="mtg-list">
       ${listHTML}
-      ${backlogHTML}
     </div>
     <div class="mtg-body">${bodyHTML}</div>
   </div>`;
@@ -205,27 +211,17 @@ export function renderMeetings({
   mount.querySelector('#add-agenda-btn')?.addEventListener('click', () => onAddAgenda?.());
   mount.querySelector('#add-followup-btn')?.addEventListener('click', () => onAddFollowup?.());
 
-  // Backlog: add existing item to current meeting
-  mount.querySelectorAll('.backlog-add').forEach(btn => {
+  // Backlog "Add to this meeting" — links an open item from another meeting
+  mount.querySelectorAll('.backlog-add-inline').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       const itemId = btn.dataset.item;
       const meetingId = btn.dataset.meeting;
-      // Check not already linked
       const exists = meeting_item_links.some(l => l.meeting_item_id === itemId && l.meeting_id === meetingId);
       if (!exists) {
         db.insert('meeting_item_links', { meeting_item_id: itemId, meeting_id: meetingId });
         onRerender?.();
       }
-    });
-  });
-
-  // Clicking a backlog item selects that task
-  mount.querySelectorAll('.backlog-item').forEach(el => {
-    el.addEventListener('click', e => {
-      if (e.target.closest('button')) return;
-      const item = meeting_items.find(mi => mi.id === el.dataset.item);
-      if (item) onSelectTask(item.task_id);
     });
   });
 
@@ -280,18 +276,21 @@ export function renderMeetings({
     });
   });
 
-  // Toggle agenda ↔ follow-up
-  mount.querySelectorAll('.item-toggle').forEach(btn => {
-    btn.addEventListener('click', e => {
+  // Change item kind (agenda ↔ follow-up) via dropdown
+  mount.querySelectorAll('.item-kind').forEach(sel => {
+    sel.addEventListener('change', e => {
       e.stopPropagation();
-      const item = meeting_items.find(mi => mi.id === btn.dataset.item);
+      const item = meeting_items.find(mi => mi.id === sel.dataset.item);
       if (!item) return;
-      const newKind = item.kind === 'agenda' ? 'followup' : 'agenda';
+      const newKind = sel.value;
+      if (newKind === item.kind) return;
       db.update('meeting_items', item.id, { kind: newKind });
       // Also change the underlying task's type to match
       db.update('tasks', item.task_id, { type: newKind });
       onRerender?.();
     });
+    // Prevent the item row click handler from firing on dropdown clicks
+    sel.addEventListener('click', e => e.stopPropagation());
   });
 
   // Remove item from meeting (unlink, not delete)
