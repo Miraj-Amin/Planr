@@ -456,11 +456,13 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .tpl-open-btn{cursor:pointer}
 .tpl-card-name.tpl-open-btn:hover{color:#534AB7}
 
+
 /* ═══════════════════════════════════════════════════════════════
-   TEMPLATE EDITOR — single unified plan grid
+   TEMPLATE EDITOR — header wrapper (grid itself renders via
+   the shared engine in gridView.js)
    ═══════════════════════════════════════════════════════════════ */
 .tep-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--page)}
-.tep-header{background:#fff;border-bottom:.5px solid var(--bd);padding:14px 24px;display:flex;align-items:center;gap:20px}
+.tep-header{background:#fff;border-bottom:.5px solid var(--bd);padding:14px 24px;display:flex;align-items:center;gap:20px;flex-shrink:0}
 .tep-back-btn{background:transparent;border:.5px solid rgba(0,0,0,.13);color:#374151;font-size:12px;padding:6px 12px;border-radius:6px;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
 .tep-back-btn:hover{background:rgba(0,0,0,.03);border-color:rgba(83,74,183,.3);color:#534AB7}
 .tep-title-block{flex:1;display:flex;flex-direction:column;gap:4px;min-width:0}
@@ -474,51 +476,8 @@ select,input{font-family:inherit;font-size:inherit;color:inherit}
 .tep-stat{display:flex;flex-direction:column;align-items:flex-end;gap:1px}
 .tep-stat b{font-size:15px;font-weight:600;color:#1A1A22;font-family:'JetBrains Mono',monospace;line-height:1}
 .tep-stat span{font-size:10px;color:#9CA3AF;text-transform:uppercase;letter-spacing:.04em}
+.tep-migrating{display:flex;align-items:center;justify-content:center;flex:1;color:#6B7280;font-size:13px;gap:10px}
 
-.tep-body{flex:1;display:flex;flex-direction:column;overflow:hidden}
-.tep-scroll{flex:1;overflow:auto;background:#fff}
-.tep-table{width:100%;border-collapse:separate;border-spacing:0;min-width:1400px}
-.tep-table th{text-align:left;font-size:10px;font-weight:600;color:#9CA3AF;text-transform:uppercase;letter-spacing:.04em;padding:8px 8px;background:#fff;border-bottom:.5px solid var(--bd);position:sticky;top:0;white-space:nowrap;z-index:1}
-.tep-table td{padding:3px 5px;border-bottom:.5px solid rgba(0,0,0,.04);vertical-align:middle}
-.tep-empty-inline{text-align:center;padding:48px;color:#9CA3AF;font-size:12px}
-
-/* Cells */
-.tep-chev-cell{text-align:center;padding:0!important}
-.tep-chev{background:transparent;border:0;padding:3px;cursor:pointer;color:#6B7280;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px}
-.tep-chev:hover{background:rgba(0,0,0,.06);color:#1A1A22}
-.tep-name-td{padding-right:2px!important}
-.tep-name-cell{display:flex;align-items:center;gap:6px;min-width:0}
-.tep-name-cell .tep-name-in{flex:1;min-width:0}
-.tep-type-icon{font-size:12px;flex-shrink:0}
-.tep-milestone-toggle{background:transparent;border:0;padding:2px;cursor:pointer;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:20px;height:20px;transition:background 100ms}
-.tep-milestone-toggle:hover{background:rgba(186,117,23,.12)}
-
-.tep-in{width:100%;box-sizing:border-box;border:.5px solid transparent;background:transparent;padding:5px 8px;font-size:12px;font-family:inherit;color:#1A1A22;outline:none;border-radius:5px;height:26px}
-.tep-in:hover:not(:disabled){border-color:rgba(0,0,0,.08)}
-.tep-in:focus{border-color:#534AB7;background:#fff}
-.tep-in:disabled{background:transparent;color:#C4C9D4;cursor:not-allowed}
-.tep-in::placeholder{color:#C4C9D4}
-
-/* Actions column — hidden until row hover */
-.tep-actions{text-align:right;white-space:nowrap;padding-right:8px!important}
-.tep-row-btn{background:transparent;border:0;padding:3px;color:#C4C9D4;cursor:pointer;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;opacity:0;transition:opacity 80ms,background 80ms,color 80ms}
-.tep-row:hover .tep-row-btn{opacity:1}
-.tep-row-btn:hover{background:rgba(0,0,0,.06);color:#374151}
-.tep-del:hover{background:rgba(226,75,74,.08);color:#E24B4A}
-.tep-add-child:hover{background:rgba(83,74,183,.08);color:#534AB7}
-.tep-add-deliv:hover{background:rgba(29,158,117,.1);color:#1D9E75}
-
-/* Row-type styling */
-.tep-row-phase td{background:rgba(83,74,183,.03)}
-.tep-row-phase:hover td{background:rgba(83,74,183,.06)}
-.tep-row-phase .tep-name-in{color:#1A1A22}
-.tep-row-milestone .tep-name-in{color:#8A5A0F;font-weight:500}
-.tep-row-deliverable td{background:rgba(29,158,117,.02)}
-.tep-row-deliverable:hover td{background:rgba(29,158,117,.05)}
-.tep-row-task:hover td,
-.tep-row-milestone:hover td{background:rgba(0,0,0,.02)}
-
-/* Add-phase button under the table */
-.tep-add-phase-wrap{background:#fff;border-top:.5px solid var(--bd);padding:12px 24px;display:flex;justify-content:center}
-.tep-add-phase-btn{background:#fff;border:.5px dashed rgba(0,0,0,.15);color:#6B7280;font-size:12px;padding:8px 20px;border-radius:8px;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
-.tep-add-phase-btn:hover{border-color:#534AB7;color:#534AB7;background:rgba(83,74,183,.03)}
+/* Templates cards — clickable title */
+.tpl-open-btn{cursor:pointer}
+.tpl-card-name.tpl-open-btn:hover{color:#534AB7}
